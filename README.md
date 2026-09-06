@@ -61,6 +61,7 @@ npm start
 
 ```bash
 npm test
+npm run test:legacy
 npm run android:assets
 ```
 
@@ -93,7 +94,7 @@ https://order.your-domain.example
 
 ## Android 工程
 
-Android 源码在 `android/`，前端资源由下面的脚本同步到 APK 资源目录：
+Android 源码在 `android/`，前端先转换为旧内核可解析的 `public/client.js`，再同步到 APK 资源目录：
 
 ```bash
 npm run android:assets
@@ -102,6 +103,18 @@ cd android
 ```
 
 Gradle 的 `preBuild` 也会自动执行资源同步，避免直接运行 `assembleDebug` 或 `assembleRelease` 时误打包旧页面。
+
+`public/app.js` 和 `shared/domain.js` 是源文件，`public/client.js` 是网页与 APK 共用的生成文件；不要直接修改生成文件。修改源文件后执行 `npm run build:web`，发布时一并提交生成文件。`npm test`、`npm run dev` 和 Android 资源同步会自动构建。只运行服务端的生产环境可使用仓库内已生成的文件，不需要安装构建开发依赖。
+
+### 兼容与启动恢复
+
+- APK 最低 Android 8.0（API 26），目标 API 36；未以调低安装门槛代替适配测试。
+- 前端语法以 Chromium 57 为转换基线；移除了 `replaceAll`、`flatMap`、`Promise.finally` 的运行依赖，金额分摊在缺少 `BigInt` 时使用精确整数回退。此基线不是所有同版本厂商 WebView 均已实测的承诺。
+- 旧内核有弹窗定位、Flex/Grid 间距、字号、安全区域及长文本回退；短按钮保持完整，窄屏允许整按钮换行。
+- 网页启动失败显示重试与内核信息；原生 WebView 启动失败或渲染进程退出会显示恢复页、系统设置入口和诊断信息，不会自动清除本机数据或循环重载。
+- `npm run test:legacy` 在隔离环境移除现代 API 后运行同步回归。可选布局测试：`ORDER_REPORT_CSS_BROWSER=/path/to/chrome node --test test/styles-compat.test.js`。这些模拟不能代替旧版 WebView 真机测试；设备验收见 [`docs/ANDROID_RECOVERY_TESTS.md`](docs/ANDROID_RECOVERY_TESTS.md)。
+
+安装更新前建议导出备份，使用同签名 APK 覆盖安装。若安装器提示签名不一致，不要为完成安装而直接卸载或清除数据。
 
 APP 是无第三方运行库的 WebView 壳，数据由内置前端保存到 Android WebView 本地存储。项目包含 Gradle Wrapper，纯命令行环境不需要安装 Android Studio。
 

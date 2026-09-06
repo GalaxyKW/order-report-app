@@ -39,11 +39,11 @@
 
   function esc(value) {
     return String(value ?? '')
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;')
-      .replaceAll('"', '&quot;')
-      .replaceAll("'", '&#039;');
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
   }
 
   function money(cents) { return `¥${Domain.formatMoney(cents)}`; }
@@ -475,13 +475,13 @@
     }), { quantity: 0, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 });
   }
   function reportSearchText(report) {
-    return [report.occurredAt, report.originalMessage, ...reportItems(report.id).flatMap((item) => [item.productName, item.note])].join(' ').toLowerCase();
+    return [report.occurredAt, report.originalMessage, ...reportItems(report.id).map((item) => [item.productName, item.note].join(' '))].join(' ').toLowerCase();
   }
   function shipmentViews() {
     return app.state.shipments.filter(Domain.isActive).map((shipment) => Domain.shipmentView(app.state, shipment));
   }
   function shipmentSearchText(view) {
-    return [view.shipment.trackingNumber, view.shipment.shippedAt, view.shipment.note, ...view.items.flatMap((item) => [item.productName, item.productNote])].join(' ').toLowerCase();
+    return [view.shipment.trackingNumber, view.shipment.shippedAt, view.shipment.note, ...view.items.map((item) => [item.productName, item.productNote].join(' '))].join(' ').toLowerCase();
   }
 
   function productLabel(item) {
@@ -786,19 +786,25 @@
   function runSyncTask(label, task) {
     if (app.syncPromise) return app.syncPromise;
     setSyncStatus('syncing', label);
-    app.syncPromise = Promise.resolve()
-      .then(task)
-      .finally(() => {
-        app.syncPromise = null;
-        updateSyncControls();
-        const shouldSyncAgain = app.syncRequested;
-        app.syncRequested = false;
-        if (app.storageRefreshPending) {
-          app.storageRefreshPending = false;
-          applyStorageRefresh();
-        }
-        if (shouldSyncAgain && app.settings.apiBase) setTimeout(sync, 0);
-      });
+    const finish = () => {
+      app.syncPromise = null;
+      updateSyncControls();
+      const shouldSyncAgain = app.syncRequested;
+      app.syncRequested = false;
+      if (app.storageRefreshPending) {
+        app.storageRefreshPending = false;
+        applyStorageRefresh();
+      }
+      if (shouldSyncAgain && app.settings.apiBase) setTimeout(sync, 0);
+    };
+    // Equivalent cleanup on both paths without requiring Promise.finally.
+    app.syncPromise = Promise.resolve().then(task).then((value) => {
+      finish();
+      return value;
+    }, (error) => {
+      finish();
+      throw error;
+    });
     updateSyncControls();
     return app.syncPromise;
   }
@@ -1637,6 +1643,7 @@
   window.handleNativeBack = navigateBack;
   localStorageRead();
   render();
+  if (window.OrderReportBoot) window.OrderReportBoot.ready();
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
   sync();
   window.addEventListener('online', sync);

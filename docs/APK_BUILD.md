@@ -8,7 +8,9 @@
 - `android/app/src/main/AndroidManifest.xml`：网络权限、应用入口和 HTTPS 安全配置。
 - `public/index.html`、`public/app.js`、`public/styles.css`：业务界面。
 - `shared/domain.js`：报单、FIFO、退款比例、统计和同步操作的核心规则。
-- `scripts/sync-android-assets.js`：把 `public/` 和 `shared/domain.js` 复制到 APK 的 `assets/`；Gradle `preBuild` 会自动执行它。
+- `scripts/build-web-assets.js`：将 `public/app.js` 和 `shared/domain.js` 合并、转换为兼容脚本 `public/client.js`。
+- `public/compat.js`：独立的启动失败保护和 Flex 间距特性探测。
+- `scripts/sync-android-assets.js`：先构建兼容脚本，再把网页资源复制到 APK 的 `assets/`；不额外打包未转换的应用源文件。Gradle `preBuild` 会自动执行它。
 - `android/app/src/main/assets/`：APK 实际打包的静态资源，不要只修改这里；修改前端后重新执行资源同步。
 
 ## 准备环境
@@ -21,6 +23,7 @@
 - Gradle Wrapper（项目已包含，版本为 8.11.1）。
 - Android Gradle Plugin 8.9.1（支持 API 36）。
 - Node.js 18.17 或更高版本。
+- `npm ci` 安装锁定依赖，构建 APK 时不能省略开发依赖（包括 esbuild）。
 
 确认 Java 和 Node 环境：
 
@@ -102,7 +105,7 @@ printf 'sdk.dir=/mnt/nvme/android-sdk\n' \
 在项目根目录执行：
 
 ```bash
-npm install
+npm ci
 npm run android:assets
 cd android
 ./gradlew --no-daemon assembleDebug
@@ -158,12 +161,15 @@ cd android
 
 ```bash
 npm test
+npm run test:legacy
 npm run android:assets
 cd android
 ./gradlew --no-daemon assembleDebug
 ```
 
-退款比例逻辑在 `shared/domain.js` 的 `addRefund` 和 `updateRefund` 中；Android 页面中的只读金额展示在 `public/app.js` 的 `refundEditor` 和 `updateRefundAmount` 中。资源同步脚本会把最新代码复制到 `android/app/src/main/assets/`，否则 APK 可能仍然包含旧页面。
+退款比例逻辑在 `shared/domain.js` 的 `addRefund` 和 `updateRefund` 中；Android 页面中的只读金额展示在 `public/app.js` 的 `refundEditor` 和 `updateRefundAmount` 中。资源同步脚本会重新生成兼容脚本并复制到 `android/app/src/main/assets/`，否则 APK 可能仍然包含旧页面。
+
+最低安装版本仍为 Android 8.0；前端语法转换以 Chromium 57 为基线，运行时金额和布局另有回退。`assembleDebug` 和 `lintDebug` 通过只表示编译与静态检查成功，不能替代 Android/WebView 跨版本实测。恢复页及设备验收流程见 [`ANDROID_RECOVERY_TESTS.md`](ANDROID_RECOVERY_TESTS.md)。请使用同签名 APK 覆盖更新；不要通过卸载或清数据来绕过签名冲突，以免丢失离线记录。
 
 ## 服务器地址和同步令牌
 

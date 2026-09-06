@@ -223,9 +223,40 @@
     const count = asNonNegativeInt(quantity ?? 0, '分摊数量');
     if (count > total) throw new Error('分摊数量不能超过总数量');
     if (!total || !count || !cents) return 0;
-    const denominator = BigInt(total);
-    const rounded = (BigInt(cents) * BigInt(count) + denominator / BigInt(2)) / denominator;
-    return Number(rounded);
+    if (typeof BigInt === 'function') {
+      const denominator = BigInt(total);
+      const rounded = (BigInt(cents) * BigInt(count) + denominator / BigInt(2)) / denominator;
+      return Number(rounded);
+    }
+
+    // Binary long division for older WebViews. For each processed prefix of
+    // cents, prefix * count = quotient * total + remainder (0 <= remainder < total).
+    // Compare before adding so no intermediate sum or product exceeds the safe
+    // integer range. Because count <= total, quotient never exceeds cents.
+    let quotient = 0;
+    let remainder = 0;
+    let unprocessed = cents;
+    let bit = 1;
+    while (bit <= Math.floor(cents / 2)) bit *= 2;
+    for (; bit >= 1; bit /= 2) {
+      quotient *= 2;
+      if (remainder >= total - remainder) {
+        remainder -= total - remainder;
+        quotient += 1;
+      } else {
+        remainder += remainder;
+      }
+      if (unprocessed >= bit) {
+        unprocessed -= bit;
+        if (remainder >= total - count) {
+          remainder -= total - count;
+          quotient += 1;
+        } else {
+          remainder += count;
+        }
+      }
+    }
+    return quotient + (remainder >= total - remainder ? 1 : 0);
   }
 
   function amountForTailQuantity(totalCents, totalQuantity, quantityBefore, quantity) {

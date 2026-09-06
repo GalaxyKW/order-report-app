@@ -7,7 +7,11 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
+    "predev": "npm run build:web",
+    "build:web": "node scripts/build-web-assets.js",
+    "pretest": "npm run build:web",
     "test": "node --test test/*.test.js",
+    "test:legacy": "ORDER_REPORT_LEGACY_TEST=1 node --test test/app-sync.test.js",
     "android:assets": "node scripts/sync-android-assets.js",
     "restore:backup": "node scripts/restore-sqlite-backup.js"
   },
@@ -16,5 +20,9 @@
   },
   "dependencies": {
     "sql.js": "^1.14.2"
+  },
+  "devDependencies": {
+    "acorn": "8.18.0",
+    "esbuild": "0.28.2"
   }
 }

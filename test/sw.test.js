@@ -93,9 +93,9 @@ test('the service worker ignores every non-shell same-origin GET even without an
 
 test('the service worker still refreshes and caches an explicit shell asset', async () => {
   const harness = createHarness();
-  const handled = await dispatchFetch(harness, request('https://app.example.test/app/app.js'));
+  const handled = await dispatchFetch(harness, request('https://app.example.test/app/client.js'));
 
   assert.notEqual(handled, null);
-  assert.deepEqual(harness.fetches, ['https://app.example.test/app/app.js']);
-  assert.deepEqual(harness.cacheWrites, ['https://app.example.test/app/app.js']);
+  assert.deepEqual(harness.fetches, ['https://app.example.test/app/client.js']);
+  assert.deepEqual(harness.cacheWrites, ['https://app.example.test/app/client.js']);
 });

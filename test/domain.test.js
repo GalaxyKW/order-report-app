@@ -1,6 +1,19 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
 const Domain = require('../shared/domain');
+
+function domainWithoutBigInt() {
+  const context = vm.createContext({ BigInt: undefined });
+  vm.runInContext(fs.readFileSync(require.resolve('../shared/domain'), 'utf8'), context);
+  return context.OrderDomain;
+}
+
+function proportionalAmountOracle(cents, total, count) {
+  if (!total) return 0;
+  return Number((BigInt(cents) * BigInt(count) + BigInt(total) / 2n) / BigInt(total));
+}
 
 function ids() {
   let counter = 0;
@@ -433,6 +446,101 @@ test('unsafe integer inputs are rejected and large proportional allocations stay
   }]);
   assert.equal(state.refunds[0].amountCents, 2730144554185731);
   assert.equal(state.refunds[0].amountCents + remaining.actualPaymentCents, totalCents);
+});
+
+test('proportional cents match a BigInt oracle with and without native BigInt', () => {
+  const legacyDomain = domainWithoutBigInt();
+  const check = (cents, total, count) => {
+    const expected = proportionalAmountOracle(cents, total, count);
+    const label = `${cents} cents, ${count}/${total}`;
+    assert.equal(Domain.amountForQuantity(cents, total, count), expected, `native: ${label}`);
+    assert.equal(legacyDomain.amountForQuantity(cents, total, count), expected, `fallback: ${label}`);
+  };
+
+  const maximum = Number.MAX_SAFE_INTEGER;
+  const boundaries = [0, 1, 2, 3, 7, 2 ** 26 - 1, 2 ** 26, 2 ** 32 + 1, 2 ** 52 - 1, 2 ** 52, maximum - 1, maximum];
+  for (const cents of boundaries) {
+    for (const total of boundaries) {
+      for (const count of new Set([0, Math.min(1, total), Math.floor(total / 2), Math.ceil(total / 2), Math.max(0, total - 1), total])) {
+        check(cents, total, count);
+      }
+    }
+  }
+  // Exhaust small denominators to cover below-half, exact-half and above-half
+  // rounding, including when only one cent is divided between many items.
+  for (let cents = 0; cents <= 32; cents += 1) {
+    for (let total = 1; total <= 32; total += 1) {
+      for (let count = 0; count <= total; count += 1) check(cents, total, count);
+    }
+  }
+
+  let seed = 0x5eeda11c;
+  const next32 = () => {
+    seed ^= seed << 13;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    return seed >>> 0;
+  };
+  const next53 = () => (next32() & 0x1fffff) * 0x100000000 + next32();
+  for (let index = 0; index < 12000; index += 1) {
+    const cents = index % 3 === 0 ? maximum - next32() : next53();
+    const total = index % 3 === 1 ? next32() % 1024 + 1 : Math.max(1, next53());
+    check(cents, total, next53() % total);
+  }
+  check(6912341670100991, 5804638223728639, 2292638615373818);
+});
+
+test('legacy proportional allocation preserves input validation and zero semantics', () => {
+  const legacyDomain = domainWithoutBigInt();
+  assert.equal(legacyDomain.amountForQuantity(null, undefined, null), 0);
+  assert.equal(legacyDomain.amountForQuantity('3', '2', '1'), 2);
+  assert.equal(legacyDomain.amountForQuantity(100, 0, 0), 0);
+  for (const args of [[-1, 1, 1], [Number.MAX_SAFE_INTEGER + 1, 1, 1], [1, Infinity, 1], [1, 2, 0.5]]) {
+    assert.throws(() => legacyDomain.amountForQuantity(...args), /安全整数范围/);
+  }
+  assert.throws(() => legacyDomain.amountForQuantity(0, 1, 2), /不能超过总数量/);
+});
+
+test('legacy refunds, shipments and remaining inventory conserve cents throughout a batch', () => {
+  const legacyDomain = domainWithoutBigInt();
+  for (const [cents, total] of [[1, 3], [100, 7], [6912341670100991, 5804638223728639], [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]]) {
+    const firstRefundCount = Math.max(1, Math.floor(total / 4));
+    const shipmentCount = Math.max(1, Math.floor(total / 3));
+    const expectedRefund = Math.floor(cents / 2);
+    const operations = [
+      operation('report.create', reportPayload('legacy_report', '兼容测试商品', total, cents, expectedRefund, 1)),
+      operation('refund.create', { refund: { id: 'legacy_refund_1', reportItemId: 'legacy_report_item', quantity: firstRefundCount, refundedAt: '2026-08-02' } }),
+      operation('shipment.create', {
+        shipment: { id: 'legacy_shipment', trackingNumber: 'LEGACY-TEST', shippingCostCents: 0, shippedAt: '2026-08-03' },
+        items: [{ productName: '兼容测试商品', quantity: shipmentCount }],
+      }),
+      operation('refund.create', { refund: { id: 'legacy_refund_2', reportItemId: 'legacy_report_item', quantity: 1, refundedAt: '2026-08-04' } }),
+    ];
+    const nativeIds = ids();
+    const legacyIds = ids();
+    let nativeState = Domain.emptyState();
+    let legacyState = legacyDomain.emptyState();
+    for (const op of operations) {
+      nativeState = Domain.applyOperation(nativeState, op, { idFactory: nativeIds, now: '2026-08-05T10:00:00.000Z' }).state;
+      legacyState = legacyDomain.applyOperation(legacyState, op, { idFactory: legacyIds, now: '2026-08-05T10:00:00.000Z' }).state;
+      assert.deepEqual(JSON.parse(JSON.stringify(legacyState)), nativeState);
+      assert.equal(legacyDomain.isStateSnapshot(legacyState), true);
+      const [lot] = legacyDomain.inventoryLots(legacyState);
+      const shipped = legacyState.shipments.map((shipment) => legacyDomain.shipmentView(legacyState, shipment));
+      const refundedCount = legacyDomain.refundQuantity(legacyState, 'legacy_report_item');
+      const actualRefund = legacyState.refunds.reduce((sum, refund) => sum + refund.amountCents, 0);
+      assert.equal(actualRefund, proportionalAmountOracle(cents, total, refundedCount));
+      for (const [field, inventoryField, totalAmount] of [
+        ['actualPaymentCents', 'availableActualPaymentCents', cents],
+        ['expectedRefundCents', 'availableExpectedRefundCents', expectedRefund],
+        ['expectedRebateCents', 'availableExpectedRebateCents', 1],
+      ]) {
+        const refunded = proportionalAmountOracle(totalAmount, total, refundedCount);
+        const shippedAmount = shipped.reduce((sum, shipment) => sum + shipment[field], 0);
+        assert.equal(refunded + shippedAmount + (lot ? lot[inventoryField] : 0), totalAmount);
+      }
+    }
+  }
 });
 
 test('normalization releases allocations and returns attached to a void shipment', () => {

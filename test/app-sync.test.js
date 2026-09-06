@@ -35,6 +35,10 @@ const TESTABLE_APP_SOURCE = `${APP_SOURCE.slice(0, END_INDEX)}
     sync,
   };
 })();${APP_SOURCE.slice(END_INDEX + END_MARKER.length)}`;
+const LEGACY_TEST = process.env.ORDER_REPORT_LEGACY_TEST === '1';
+const EXECUTABLE_APP_SOURCE = LEGACY_TEST
+  ? require('../scripts/build-web-assets').compileClient('', TESTABLE_APP_SOURCE)
+  : TESTABLE_APP_SOURCE;
 
 function deferred() {
   let resolve;
@@ -176,12 +180,18 @@ function createHarness(fetchImplementation, options = {}) {
   window.window = window;
 
   let fetchImpl = fetchImplementation;
+  let legacyPromise;
   const context = vm.createContext({
     console,
     Date: options.Date || Date,
     document,
     Element: FakeElement,
-    fetch(...args) { return fetchImpl(...args); },
+    fetch(...args) {
+      const response = fetchImpl(...args);
+      // Network stubs originate in Node. Adopt their promises into the VM so
+      // a host Promise.prototype.finally cannot hide a missing legacy API.
+      return legacyPromise ? legacyPromise.resolve(response) : response;
+    },
     localStorage,
     location: { origin: 'null', protocol: 'file:' },
     navigator: {},
@@ -193,7 +203,29 @@ function createHarness(fetchImplementation, options = {}) {
     window,
   });
 
-  vm.runInContext(TESTABLE_APP_SOURCE, context, { filename: APP_PATH });
+  if (LEGACY_TEST) {
+    const hostFeatures = [String.prototype.replaceAll, Array.prototype.flatMap, Promise.prototype.finally, BigInt];
+    vm.runInContext(`
+      delete String.prototype.replaceAll;
+      delete Array.prototype.flatMap;
+      delete Promise.prototype.finally;
+      delete globalThis.BigInt;
+    `, context);
+    assert.equal(vm.runInContext(`
+      typeof String.prototype.replaceAll === 'undefined'
+        && typeof Array.prototype.flatMap === 'undefined'
+        && typeof Promise.prototype.finally === 'undefined'
+        && typeof BigInt === 'undefined'
+    `, context), true, 'legacy features must be absent from VM intrinsics');
+    assert.deepEqual(
+      [String.prototype.replaceAll, Array.prototype.flatMap, Promise.prototype.finally, BigInt],
+      hostFeatures,
+      'legacy feature removal must not mutate Node intrinsics',
+    );
+    legacyPromise = vm.runInContext('Promise', context);
+  }
+
+  vm.runInContext(EXECUTABLE_APP_SOURCE, context, { filename: APP_PATH });
   const api = window.__appSyncTest;
   if (!options.keepLoadedSettings) {
     api.app.settings = { apiBase: 'https://sync.example.test', token: 'test-token' };

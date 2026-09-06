@@ -16,8 +16,8 @@ android {
         applicationId 'com.orderreport.app'
         minSdk 26
         targetSdk 36
-        versionCode 1
-        versionName '0.1.0'
+        versionCode 2
+        versionName '0.1.1'
     }
 
     if (signingPropertiesFile.isFile()) {
@@ -68,6 +68,8 @@ def syncWebAssets = tasks.register('syncWebAssets', Exec) {
     inputs.dir new File(repositoryRoot, 'public')
     inputs.dir new File(repositoryRoot, 'shared')
     inputs.file new File(repositoryRoot, 'scripts/sync-android-assets.js')
+    inputs.file new File(repositoryRoot, 'scripts/build-web-assets.js')
+    inputs.file new File(repositoryRoot, 'package-lock.json')
     outputs.dir new File(projectDir, 'src/main/assets')
 }
 

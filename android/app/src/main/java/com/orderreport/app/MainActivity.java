@@ -3,28 +3,40 @@ package com.orderreport.app;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.content.res.Configuration;
 import android.graphics.Insets;
+import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.print.PrintAttributes;
 import android.print.PrintManager;
+import android.provider.Settings;
+import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
 import android.window.OnBackInvokedDispatcher;
 
 import org.json.JSONObject;
@@ -44,6 +56,8 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class MainActivity extends Activity {
+    private static final String LOG_TAG = "OrderReportWebView";
+    private static final String KEY_WEBVIEW_RECOVERY = "webViewRecoveryMessage";
     private static final int EXPORT_REQUEST_CODE = 4201;
     private static final String APP_URL = "file:///android_asset/index.html";
     private static final String APP_URL_NATIVE_INSETS = APP_URL + "?nativeInsets=1";
@@ -51,11 +65,11 @@ public final class MainActivity extends Activity {
     private static final ExportCoordinator EXPORTS = new ExportCoordinator();
 
     private FrameLayout contentRoot;
-    private WebView webView;
+    private volatile WebView webView;
+    private String recoveryMessage;
     private volatile boolean destroyed;
     private volatile boolean pageReady;
 
-    @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -64,8 +78,52 @@ public final class MainActivity extends Activity {
 
         contentRoot = new FrameLayout(this);
         contentRoot.setBackgroundColor(0xFFF5F3EE);
-        webView = new WebView(this);
-        WebSettings settings = webView.getSettings();
+        setContentView(contentRoot);
+        configureWindowInsets();
+
+        String savedRecovery = savedInstanceState == null
+                ? null : savedInstanceState.getString(KEY_WEBVIEW_RECOVERY);
+        if (savedRecovery == null) startWebView(savedInstanceState);
+        else showWebViewRecovery(savedRecovery);
+        EXPORTS.attach(this, savedInstanceState, savedInstanceState != null);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    this::handleBackPressed);
+        }
+    }
+
+    private void startWebView(Bundle savedInstanceState) {
+        if (destroyed || isFinishing() || contentRoot == null) return;
+        releaseWebView(webView);
+        contentRoot.removeAllViews();
+        recoveryMessage = null;
+        pageReady = false;
+        try {
+            WebView current = new WebView(this);
+            webView = current;
+            configureWebView(current);
+            contentRoot.addView(current, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+            if (savedInstanceState == null || current.restoreState(savedInstanceState) == null) {
+                current.loadUrl(startUrl());
+            }
+        } catch (RuntimeException | LinkageError error) {
+            // Provider loading can fail before a page exists. Keep the fallback native,
+            // and do not catch VM errors (for example OutOfMemoryError).
+            logWebViewFailure("startup", error);
+            releaseWebView(webView);
+            showWebViewRecovery("系统网页组件未能启动。请在系统设置或应用商店中启用、更新网页组件，"
+                    + "然后返回重试。若仍无法打开，请复制下方诊断信息用于排查。\n\n"
+                    + "错误类型：" + error.getClass().getSimpleName());
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private void configureWebView(WebView current) {
+        WebSettings settings = current.getSettings();
         // The bundled offline application requires JavaScript; top-level navigation is
         // restricted to our own android_asset origin by the WebViewClient below.
         settings.setJavaScriptEnabled(true);
@@ -76,7 +134,7 @@ public final class MainActivity extends Activity {
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
-        webView.setWebViewClient(new WebViewClient() {
+        current.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 return !isAppAsset(request.getUrl());
@@ -90,7 +148,7 @@ public final class MainActivity extends Activity {
 
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                pageReady = false;
+                if (webView == view) pageReady = false;
             }
 
             @Override
@@ -98,35 +156,158 @@ public final class MainActivity extends Activity {
                 if (destroyed || webView != view) return;
                 pageReady = true;
                 if (usesNativeInsets()) {
-                    view.evaluateJavascript(
-                            "document.documentElement.classList.add('native-insets')",
-                            ignored -> EXPORTS.onPageReady(MainActivity.this));
+                    postJavascript("document.documentElement.classList.add('native-insets')",
+                            () -> EXPORTS.onPageReady(MainActivity.this));
                 } else {
                     EXPORTS.onPageReady(MainActivity.this);
                 }
             }
+
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                boolean wasCurrent = webView == view;
+                releaseWebView(view);
+                if (wasCurrent && !destroyed) {
+                    Log.w(LOG_TAG, detail.didCrash() ? "renderer crashed" : "renderer terminated");
+                    showWebViewRecovery(detail.didCrash()
+                            ? "页面运行时中断。可以点击“重新打开页面”恢复；若再次出现，请更新系统网页组件并复制诊断信息。"
+                            : "系统已回收页面进程，可能是可用内存不足。可以关闭暂时不用的应用，再点击“重新打开页面”。");
+                }
+                // The old instance must not be reused. Recovery is initiated only by
+                // the user's retry button, so a bad page cannot cause a reload loop.
+                return true;
+            }
         });
-        webView.addJavascriptInterface(new PrintBridge(), "AndroidPrint");
-        webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
-        webView.setBackgroundColor(0xFFF5F3EE);
-        contentRoot.addView(webView, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT));
-        setContentView(contentRoot);
-        configureWindowInsets();
+        current.addJavascriptInterface(new PrintBridge(current), "AndroidPrint");
+        current.addJavascriptInterface(new AndroidBridge(current), "AndroidBridge");
+        current.setBackgroundColor(0xFFF5F3EE);
+    }
 
-        if (savedInstanceState != null) {
-            if (webView.restoreState(savedInstanceState) == null) webView.loadUrl(startUrl());
-        } else {
-            webView.loadUrl(startUrl());
+    private void releaseWebView(WebView current) {
+        if (current == null) return;
+        if (webView == current) {
+            webView = null;
+            pageReady = false;
+            // Keep a result whose JavaScript callback was lost with the renderer.
+            EXPORTS.resultDeliveryDeferred(this);
         }
-        EXPORTS.attach(this, savedInstanceState, savedInstanceState != null);
+        if (current.getParent() instanceof ViewGroup) {
+            ((ViewGroup) current.getParent()).removeView(current);
+        }
+        try {
+            // After renderer termination only removal and destruction are safe.
+            // In particular, do not evaluate JavaScript or call stopLoading here.
+            current.destroy();
+        } catch (RuntimeException | LinkageError error) {
+            logWebViewFailure("cleanup", error);
+        }
+    }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-                    this::handleBackPressed);
+    private void showWebViewRecovery(String message) {
+        if (destroyed || contentRoot == null) return;
+        recoveryMessage = message;
+        contentRoot.removeAllViews();
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        int padding = Math.round(24 * getResources().getDisplayMetrics().density);
+        body.setPadding(padding, padding, padding, padding);
+        scroll.addView(body, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView heading = recoveryText("暂时无法显示页面", 23);
+        heading.setTypeface(null, Typeface.BOLD);
+        body.addView(heading);
+        body.addView(recoveryText(message, 16));
+        body.addView(recoveryText("已保存的本机记录会保留；尚未保存的编辑可能需要重新填写。"
+                + "请不要卸载应用或清除应用数据。", 15));
+        addRecoveryButton(body, "重新打开页面", () -> startWebView(null));
+        addRecoveryButton(body, "系统网页组件设置", this::openWebViewSettings);
+        addRecoveryButton(body, "报单管家应用设置", () -> openSettings(
+                new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName()))));
+
+        String diagnostics = "Android " + Build.VERSION.RELEASE + " / API " + Build.VERSION.SDK_INT
+                + "\n" + Build.MANUFACTURER + " " + Build.MODEL + "\n" + webViewDescription();
+        TextView details = recoveryText(diagnostics, 13);
+        details.setTextIsSelectable(true);
+        body.addView(details);
+        addRecoveryButton(body, "复制诊断信息", () -> {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard != null) {
+                try {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("报单管家诊断", message + "\n\n" + diagnostics));
+                    Toast.makeText(this, "诊断信息已复制，不包含业务记录", Toast.LENGTH_SHORT).show();
+                    return;
+                } catch (SecurityException ignored) {
+                    // Some managed devices restrict clipboard access.
+                }
+            }
+            Toast.makeText(this, "无法自动复制，可长按上方版本信息选择文字", Toast.LENGTH_LONG).show();
+        });
+        contentRoot.addView(scroll, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    private TextView recoveryText(String text, int size) {
+        TextView view = new TextView(this);
+        view.setText(text);
+        view.setTextSize(size);
+        view.setTextColor(0xFF243B32);
+        view.setLineSpacing(4 * getResources().getDisplayMetrics().density, 1.1f);
+        view.setPadding(0, 0, 0, Math.round(16 * getResources().getDisplayMetrics().density));
+        return view;
+    }
+
+    private void addRecoveryButton(LinearLayout body, String label, Runnable action) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setAllCaps(false);
+        button.setOnClickListener(ignored -> action.run());
+        body.addView(button, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    private PackageInfo currentWebViewPackage() {
+        try {
+            return WebView.getCurrentWebViewPackage();
+        } catch (RuntimeException | LinkageError error) {
+            return null;
         }
+    }
+
+    private String webViewDescription() {
+        PackageInfo provider = currentWebViewPackage();
+        return provider == null ? "WebView：未检测到可用组件"
+                : "WebView：" + provider.packageName + "\n版本：" + provider.versionName;
+    }
+
+    private void openWebViewSettings() {
+        PackageInfo provider = currentWebViewPackage();
+        if (provider != null && tryOpenSettings(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:" + provider.packageName)))) return;
+        openSettings(new Intent(Settings.ACTION_WEBVIEW_SETTINGS));
+    }
+
+    private void openSettings(Intent preferred) {
+        if (!tryOpenSettings(preferred) && !tryOpenSettings(new Intent(Settings.ACTION_SETTINGS))) {
+            Toast.makeText(this, "无法自动打开设置，请从手机设置中打开应用管理", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private boolean tryOpenSettings(Intent intent) {
+        try {
+            startActivity(intent);
+            return true;
+        } catch (ActivityNotFoundException | SecurityException error) {
+            return false;
+        }
+    }
+
+    private static void logWebViewFailure(String phase, Throwable error) {
+        // Only the phase and exception type are logged, never URLs, scripts or records.
+        Log.w(LOG_TAG, phase + ": " + error.getClass().getSimpleName());
     }
 
     @Override
@@ -203,23 +384,45 @@ public final class MainActivity extends Activity {
     }
 
     private final class PrintBridge {
+        private final WebView owner;
+
+        PrintBridge(WebView owner) {
+            this.owner = owner;
+        }
+
         @JavascriptInterface
         public void print() {
             runOnUiThread(() -> {
                 WebView current = webView;
-                if (destroyed || current == null || isFinishing()) return;
+                if (destroyed || current != owner || isFinishing()) return;
                 PrintManager printManager = (PrintManager) getSystemService(Context.PRINT_SERVICE);
+                if (printManager == null) {
+                    Toast.makeText(MainActivity.this, "手机未提供打印服务", Toast.LENGTH_LONG).show();
+                    return;
+                }
                 String jobName = getString(R.string.app_name) + " 单据";
-                printManager.print(jobName, current.createPrintDocumentAdapter(jobName), new PrintAttributes.Builder()
-                        .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
-                        .build());
+                try {
+                    printManager.print(jobName, current.createPrintDocumentAdapter(jobName), new PrintAttributes.Builder()
+                            .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
+                            .build());
+                } catch (RuntimeException error) {
+                    Log.w(LOG_TAG, "printing unavailable: " + error.getClass().getSimpleName());
+                    Toast.makeText(MainActivity.this, "暂时无法打开打印服务，请稍后重试", Toast.LENGTH_LONG).show();
+                }
             });
         }
     }
 
     private final class AndroidBridge {
+        private final WebView owner;
+
+        AndroidBridge(WebView owner) {
+            this.owner = owner;
+        }
+
         @JavascriptInterface
         public void saveText(String fileName, String content) {
+            if (destroyed || webView != owner) return;
             EXPORTS.requestExport(MainActivity.this, fileName, content);
         }
     }
@@ -303,16 +506,16 @@ public final class MainActivity extends Activity {
         }
         current.post(() -> {
             if (destroyed || webView != current || !pageReady) {
-                if (delivered != null) EXPORTS.resultDeliveryDeferred(this);
+                if (delivered != null && webView == current) EXPORTS.resultDeliveryDeferred(this);
                 return;
             }
             try {
                 current.evaluateJavascript(script, ignored -> {
                     if (!destroyed && webView == current && delivered != null) delivered.run();
-                    else if (delivered != null) EXPORTS.resultDeliveryDeferred(this);
+                    else if (delivered != null && webView == current) EXPORTS.resultDeliveryDeferred(this);
                 });
             } catch (RuntimeException error) {
-                if (delivered != null) EXPORTS.resultDeliveryDeferred(this);
+                if (delivered != null && webView == current) EXPORTS.resultDeliveryDeferred(this);
             }
         });
     }
@@ -326,7 +529,15 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onSaveInstanceState(Bundle outState) {
-        if (webView != null) webView.saveState(outState);
+        WebView current = webView;
+        if (current != null) {
+            try {
+                current.saveState(outState);
+            } catch (RuntimeException error) {
+                logWebViewFailure("save navigation state", error);
+            }
+        }
+        if (recoveryMessage != null) outState.putString(KEY_WEBVIEW_RECOVERY, recoveryMessage);
         EXPORTS.saveInstanceState(outState);
         super.onSaveInstanceState(outState);
     }
@@ -339,16 +550,7 @@ public final class MainActivity extends Activity {
         FrameLayout root = contentRoot;
         contentRoot = null;
         if (root != null) root.setOnApplyWindowInsetsListener(null);
-        WebView current = webView;
-        webView = null;
-        if (current != null) {
-            if (root != null) root.removeView(current);
-            current.removeJavascriptInterface("AndroidPrint");
-            current.removeJavascriptInterface("AndroidBridge");
-            current.stopLoading();
-            current.removeAllViews();
-            current.destroy();
-        }
+        releaseWebView(webView);
         super.onDestroy();
     }
 
@@ -364,14 +566,20 @@ public final class MainActivity extends Activity {
             super.onBackPressed();
             return;
         }
-        current.evaluateJavascript(
-                "(window.handleNativeBack && window.handleNativeBack()) === true",
-                result -> {
-                    if (destroyed || webView != current) return;
-                    if ("true".equals(result)) return;
-                    if (current.canGoBack()) current.goBack();
-                    else MainActivity.super.onBackPressed();
-                });
+        try {
+            current.evaluateJavascript(
+                    "(window.handleNativeBack && window.handleNativeBack()) === true",
+                    result -> {
+                        if (destroyed || webView != current) return;
+                        if ("true".equals(result)) return;
+                        if (current.canGoBack()) current.goBack();
+                        else MainActivity.super.onBackPressed();
+                    });
+        } catch (RuntimeException error) {
+            logWebViewFailure("back navigation", error);
+            releaseWebView(current);
+            showWebViewRecovery("页面暂时无法响应。请点击“重新打开页面”恢复，或复制诊断信息用于排查。");
+        }
     }
 
     private static final class ExportResult {
