@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- A separate debug-only entry remains usable when MainActivity fails.
+             It deliberately does not construct or query a WebView. -->
+        <activity
+            android:name=".DiagnosticActivity"
+            android:exported="true"
+            android:label="报单管家诊断"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar"
+            android:taskAffinity="com.orderreport.app.diagnostics">
+            <intent-filter android:priority="-1">
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

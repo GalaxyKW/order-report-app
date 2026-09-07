@@ -116,6 +116,8 @@ Gradle 的 `preBuild` 也会自动执行资源同步，避免直接运行 `assem
 
 安装更新前建议导出备份，使用同签名 APK 覆盖安装。若安装器提示签名不一致，不要为完成安装而直接卸载或清除数据。
 
+0.1.2 修正了系统栏控制器在窗口创建前被读取的启动时序问题，并保护异常导出恢复状态。Debug 版多一个“报单管家诊断”图标，不加载 WebView；如果主界面仍退出，可用该入口复制本机启动诊断。原生跨 API 生命周期测试和反馈步骤见上述设备验收文档。
+
 APP 是无第三方运行库的 WebView 壳，数据由内置前端保存到 Android WebView 本地存储。项目包含 Gradle Wrapper，纯命令行环境不需要安装 Android Studio。
 
 完整的环境准备、Debug/Release 构建和安装步骤见 [`docs/APK_BUILD.md`](docs/APK_BUILD.md)。

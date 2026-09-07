@@ -72,21 +72,29 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        CrashDiagnostics.markStage(this, "activity_create");
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
-        configureSystemBars();
 
+        CrashDiagnostics.markStage(this, "content_view");
         contentRoot = new FrameLayout(this);
         contentRoot.setBackgroundColor(0xFFF5F3EE);
         setContentView(contentRoot);
+        // PhoneWindow.getInsetsController() dereferences its DecorView. It may
+        // not exist before setContentView, even on a supported API level.
+        CrashDiagnostics.markStage(this, "system_bars");
+        configureSystemBars();
+        CrashDiagnostics.markStage(this, "window_insets");
         configureWindowInsets();
 
         String savedRecovery = savedInstanceState == null
                 ? null : savedInstanceState.getString(KEY_WEBVIEW_RECOVERY);
         if (savedRecovery == null) startWebView(savedInstanceState);
         else showWebViewRecovery(savedRecovery);
+        CrashDiagnostics.markStage(this, "export_restore");
         EXPORTS.attach(this, savedInstanceState, savedInstanceState != null);
 
+        CrashDiagnostics.markStage(this, "back_callback");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
                     OnBackInvokedDispatcher.PRIORITY_DEFAULT,
@@ -101,19 +109,23 @@ public final class MainActivity extends Activity {
         recoveryMessage = null;
         pageReady = false;
         try {
+            CrashDiagnostics.markStage(this, "webview_start");
             WebView current = new WebView(this);
             webView = current;
+            CrashDiagnostics.markStage(this, "webview_configure");
             configureWebView(current);
             contentRoot.addView(current, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT));
             if (savedInstanceState == null || current.restoreState(savedInstanceState) == null) {
+                CrashDiagnostics.markStage(this, "webview_load");
                 current.loadUrl(startUrl());
             }
         } catch (RuntimeException | LinkageError error) {
             // Provider loading can fail before a page exists. Keep the fallback native,
             // and do not catch VM errors (for example OutOfMemoryError).
             logWebViewFailure("startup", error);
+            CrashDiagnostics.recordFailure(this, "webview_start", error);
             releaseWebView(webView);
             showWebViewRecovery("系统网页组件未能启动。请在系统设置或应用商店中启用、更新网页组件，"
                     + "然后返回重试。若仍无法打开，请复制下方诊断信息用于排查。\n\n"
@@ -154,6 +166,7 @@ public final class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 if (destroyed || webView != view) return;
+                CrashDiagnostics.markStage(MainActivity.this, "page_ready");
                 pageReady = true;
                 if (usesNativeInsets()) {
                     postJavascript("document.documentElement.classList.add('native-insets')",
@@ -205,6 +218,7 @@ public final class MainActivity extends Activity {
 
     private void showWebViewRecovery(String message) {
         if (destroyed || contentRoot == null) return;
+        CrashDiagnostics.markStage(this, "webview_recovery");
         recoveryMessage = message;
         contentRoot.removeAllViews();
         ScrollView scroll = new ScrollView(this);
@@ -611,6 +625,8 @@ public final class MainActivity extends Activity {
         private static final String STAGE_COPYING = "copying";
         private static final int WRITE_CHUNK_SIZE = 8 * 1024;
         private static final long STALE_EXPORT_AGE_MS = 24L * 60L * 60L * 1000L;
+        private static final String RECOVERY_BLOCKED_MESSAGE = "上次导出任务恢复失败，原记录和导出文件已保留。"
+                + "暂时无法保存新的导出文件，其余录入和查询可继续使用。请保留应用数据并联系维护人员。";
 
         private final Object monitor = new Object();
         private final AtomicLong sequence = new AtomicLong(System.currentTimeMillis());
@@ -619,6 +635,7 @@ public final class MainActivity extends Activity {
         private Context applicationContext;
         private ExecutorService executor;
         private boolean loaded;
+        private boolean recoveryBlocked;
         private boolean pickerDispatchPending;
         private long activeJobId;
         private String stage;
@@ -634,50 +651,87 @@ public final class MainActivity extends Activity {
             boolean resumeCopy = false;
             boolean launchPicker;
             boolean busy;
+            boolean blocked;
             synchronized (monitor) {
                 applicationContext = activity.getApplicationContext();
                 activityReference = new WeakReference<>(activity);
                 if (!loaded) {
-                    loadLocked(savedInstanceState);
-                    loaded = true;
-                    if (activeJobId != 0L) {
-                        sequence.accumulateAndGet(activeJobId, Math::max);
-                        File restoredFile = resolveCacheFileLocked();
-                        if (STAGE_PREPARING.equals(stage)) {
-                            recordResultAndClearLocked(false, "上次导出在准备文件时中断，请重新导出");
-                        } else if (restoredFile == null || !restoredFile.isFile()) {
-                            recordResultAndClearLocked(false, "上次导出内容已失效，请重新导出");
-                        } else if (STAGE_PICKER.equals(stage) && !systemRestore) {
-                            stage = STAGE_READY;
-                            if (!persistLocked()) {
+                    try {
+                        boolean restoredFromBundle = loadLocked(savedInstanceState);
+                        loaded = true;
+                        if (activeJobId != 0L) {
+                            sequence.accumulateAndGet(activeJobId, Math::max);
+                            File restoredFile = resolveCacheFileLocked();
+                            boolean restoredFileExists = restoredFile != null && restoredFile.isFile();
+                            // Finish recovery reads before writing a Bundle-restored task.
+                            // A file-access failure must preserve the original preferences.
+                            if (restoredFromBundle) persistLocked();
+                            if (STAGE_PREPARING.equals(stage)) {
+                                recordResultAndClearLocked(false, "上次导出在准备文件时中断，请重新导出");
+                            } else if (!restoredFileExists) {
+                                recordResultAndClearLocked(false, "上次导出内容已失效，请重新导出");
+                            } else if (STAGE_PICKER.equals(stage) && !systemRestore) {
+                                stage = STAGE_READY;
+                                if (!persistLocked()) {
+                                    abandonedFile = restoredFile;
+                                    recordResultAndClearLocked(false, "无法恢复上次导出任务，请重新导出");
+                                }
+                            } else if (STAGE_COPYING.equals(stage)) {
+                                Uri restoredDestination = destination == null ? null : Uri.parse(destination);
+                                if (!isWritableContentUri(restoredDestination)) {
+                                    abandonedFile = restoredFile;
+                                    recordResultAndClearLocked(false, "上次导出的保存位置无效，请重新导出");
+                                } else {
+                                    resumeCopy = true;
+                                }
+                            } else if (!STAGE_READY.equals(stage) && !STAGE_PICKER.equals(stage)) {
                                 abandonedFile = restoredFile;
-                                recordResultAndClearLocked(false, "无法恢复上次导出任务，请重新导出");
+                                recordResultAndClearLocked(false, "上次导出任务状态无效，请重新导出");
                             }
-                        } else if (STAGE_COPYING.equals(stage)) {
-                            Uri restoredDestination = destination == null ? null : Uri.parse(destination);
-                            if (!isWritableContentUri(restoredDestination)) {
-                                abandonedFile = restoredFile;
-                                recordResultAndClearLocked(false, "上次导出的保存位置无效，请重新导出");
-                            } else {
-                                resumeCopy = true;
-                            }
-                        } else if (!STAGE_READY.equals(stage) && !STAGE_PICKER.equals(stage)) {
-                            abandonedFile = restoredFile;
-                            recordResultAndClearLocked(false, "上次导出任务状态无效，请重新导出");
                         }
+                    } catch (RuntimeException error) {
+                        // A type mismatch in SharedPreferences or inaccessible recovery
+                        // files must not prevent unrelated offline work from starting.
+                        // Never persist the partly-read state or delete its cache files.
+                        recoveryBlocked = true;
+                        loaded = true;
+                        clearActiveLocked();
+                        pendingResult = null;
+                        deliveringResultId = 0L;
+                        resultActivityReference.clear();
+                        pickerDispatchPending = false;
+                        abandonedFile = null;
+                        resumeCopy = false;
+                        Log.w(LOG_TAG, "export recovery blocked: " + error.getClass().getSimpleName());
+                        CrashDiagnostics.recordFailure(activity, "export_restore", error);
                     }
                 }
-                busy = activeJobId != 0L;
-                launchPicker = STAGE_READY.equals(stage);
-                if (STAGE_COPYING.equals(stage) && executor == null) resumeCopy = true;
+                blocked = recoveryBlocked;
+                busy = blocked || activeJobId != 0L;
+                launchPicker = !blocked && STAGE_READY.equals(stage);
+                if (!blocked && STAGE_COPYING.equals(stage) && executor == null) resumeCopy = true;
             }
 
+            if (blocked) {
+                activity.applyExportBusy(true);
+                notifyRecoveryBlocked(activity);
+                return;
+            }
             deleteQuietly(abandonedFile);
             cleanupStaleExports();
             activity.applyExportBusy(busy);
             deliverPendingResult(activity);
             if (launchPicker) dispatchPicker();
             if (resumeCopy) resumeCopy();
+        }
+
+        private void notifyRecoveryBlocked(MainActivity activity) {
+            activity.runOnUiThread(() -> {
+                if (activity.destroyed || activity.isFinishing()) return;
+                // This warning is native, so it is visible even before JS is ready.
+                Toast.makeText(activity, RECOVERY_BLOCKED_MESSAGE, Toast.LENGTH_LONG).show();
+                activity.notifyExportImmediately(false, RECOVERY_BLOCKED_MESSAGE);
+            });
         }
 
         void detach(MainActivity activity) {
@@ -705,11 +759,13 @@ public final class MainActivity extends Activity {
             long jobId;
             boolean duplicate;
             boolean persisted;
+            boolean blocked;
             synchronized (monitor) {
                 applicationContext = activity.getApplicationContext();
                 activityReference = new WeakReference<>(activity);
+                blocked = recoveryBlocked;
                 duplicate = activeJobId != 0L;
-                if (duplicate) {
+                if (blocked || duplicate) {
                     jobId = 0L;
                     persisted = true;
                 } else {
@@ -723,6 +779,10 @@ public final class MainActivity extends Activity {
                     persisted = persistLocked();
                     if (!persisted) clearActiveLocked();
                 }
+            }
+            if (blocked) {
+                notifyRecoveryBlocked(activity);
+                return;
             }
             if (duplicate) {
                 activity.notifyExportImmediately(false, "已有导出正在进行，请完成后再试");
@@ -834,7 +894,7 @@ public final class MainActivity extends Activity {
             boolean busy;
             synchronized (monitor) {
                 if (activityReference.get() != activity) return;
-                busy = activeJobId != 0L;
+                busy = recoveryBlocked || activeJobId != 0L;
             }
             activity.applyExportBusy(busy);
             deliverPendingResult(activity);
@@ -860,7 +920,7 @@ public final class MainActivity extends Activity {
 
         void saveInstanceState(Bundle outState) {
             synchronized (monitor) {
-                if (activeJobId == 0L) return;
+                if (recoveryBlocked || activeJobId == 0L) return;
                 outState.putLong(KEY_JOB_ID, activeJobId);
                 outState.putString(KEY_STAGE, stage);
                 outState.putString(KEY_FILE_NAME, fileName);
@@ -1047,7 +1107,7 @@ public final class MainActivity extends Activity {
             }
         }
 
-        private void loadLocked(Bundle savedInstanceState) {
+        private boolean loadLocked(Bundle savedInstanceState) {
             SharedPreferences preferences = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
             activeJobId = preferences.getLong(KEY_JOB_ID, 0L);
             stage = preferences.getString(KEY_STAGE, null);
@@ -1071,13 +1131,14 @@ public final class MainActivity extends Activity {
                     cacheName = savedInstanceState.getString(KEY_CACHE_NAME);
                     destination = savedInstanceState.getString(KEY_DESTINATION);
                     persistedPermission = savedInstanceState.getBoolean(KEY_PERSISTED_PERMISSION, false);
-                    persistLocked();
+                    return true;
                 }
             }
+            return false;
         }
 
         private boolean persistLocked() {
-            if (applicationContext == null) return false;
+            if (recoveryBlocked || applicationContext == null) return false;
             SharedPreferences.Editor editor = applicationContext
                     .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                     .edit()
@@ -1129,18 +1190,24 @@ public final class MainActivity extends Activity {
             Context context;
             String preservedName;
             synchronized (monitor) {
+                if (recoveryBlocked) return;
                 context = applicationContext;
                 preservedName = cacheName;
             }
             if (context == null) return;
-            File[] files = context.getCacheDir().listFiles(
-                    (directory, name) -> name.startsWith(EXPORT_FILE_PREFIX));
-            if (files == null) return;
-            long cutoff = System.currentTimeMillis() - STALE_EXPORT_AGE_MS;
-            for (File file : files) {
-                if (!file.getName().equals(preservedName) && file.lastModified() < cutoff) {
-                    deleteQuietly(file);
+            try {
+                File[] files = context.getCacheDir().listFiles(
+                        (directory, name) -> name.startsWith(EXPORT_FILE_PREFIX));
+                if (files == null) return;
+                long cutoff = System.currentTimeMillis() - STALE_EXPORT_AGE_MS;
+                for (File file : files) {
+                    if (!file.getName().equals(preservedName) && file.lastModified() < cutoff) {
+                        deleteQuietly(file);
+                    }
                 }
+            } catch (RuntimeException error) {
+                // Cache cleanup is optional; inaccessible files can remain in place.
+                Log.w(LOG_TAG, "export cleanup skipped: " + error.getClass().getSimpleName());
             }
         }
 

@@ -2,6 +2,29 @@
 
 此清单验证 `MainActivity` 的原生恢复页面和 WebView 生命周期。Java 编译、Android Lint、`npm test` 均不能替代这些设备测试。测试应使用仅含虚构记录的专用设备或模拟器，不对存有真实记录的手机执行停用组件、进程终止或清数据操作。
 
+## 0.1.2 启动修复和诊断入口
+
+原生框架生命周期回归在未修复版本的 API 35 冷启动中复现了 `PhoneWindow.getInsetsController()` 空指针：`onCreate()` 在 `setContentView()` 之前配置系统栏，框架尚未创建 `DecorView`。修复将系统栏配置移到内容视图安装之后，而不是只检查 API 版本或返回的控制器是否为空。
+
+另在 API 26 中复现了导出偏好 `jobId` 类型异常导致的启动 `ClassCastException`。遇到无法读取的导出恢复状态，现在保留原偏好和缓存、暂停新的文件导出并显示提示；不清业务数据，不阻止其他离线操作。
+
+Debug APK 额外包含“报单管家诊断”桌面入口，Release 不包含该 Activity。若主入口仍闪退：
+
+1. 确认安装版本为 0.1.2，同签名覆盖安装，不卸载或清除数据。
+2. 打开“报单管家诊断”，点击“尝试打开主界面”。
+3. 若退出，再次打开“报单管家诊断”，点击“复制诊断信息”反馈。
+
+该入口不创建或查询 WebView，不依赖 MainActivity 类加载。Application 在 Activity 之前安装未捕获异常记录器；仅在应用私有目录保存限长的异常类型/栈位置、固定启动阶段和版本信息，随后继续交由 Android 默认崩溃处理器终止进程。Android 11+另读取本应用最近的系统退出原因；不读取退出描述/trace、不记录异常消息、订单、URL或令牌，不自动上传。原生信号崩溃不一定有 Java 栈，需结合系统退出原因或 Logcat。
+
+原生回归运行命令（需要开发依赖网络下载，以及运行 API 36 测试的 JDK/JRE 21）：
+
+```bash
+cd android
+./gradlew testDebugUnitTest -PtestJavaExecutable=/path/to/java-21/bin/java
+```
+
+`MainActivityStartupTest` 使用 API 26/28/30/33/35/36 的 Android 框架实现，检查正常启动、重建、损坏导出状态保护和独立诊断入口。Robolectric 的 WebView 使用测试替身，不运行真实 Chromium，因此这些结果仍不能替代厂商设备测试。
+
 ## 版本与显示条件
 
 至少覆盖 API 26、30、33、35、36；每个版本记录手机/模拟器型号、Android 版本、实际 WebView 包名及版本。API 26 仍是 APK 安装下限。API 35/36 分别覆盖手势/三键导航、软键盘、横屏和大字体；原生恢复页应可滚动，按钮不被系统栏遮住。
