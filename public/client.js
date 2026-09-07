@@ -948,8 +948,35 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   let lastPersistedRaw = null;
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+  const UI_ICONS = {
+    dashboard: '<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
+    reports: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/>',
+    shipments: '<path d="M3 6h11v11H8M3 6v11h1M14 10h4l3 4v3h-2M14 17h1"/><circle cx="6" cy="17" r="2"/><circle cx="17" cy="17" r="2"/>',
+    inventory: '<path d="m3 9 9-6 9 6v11a1 1 0 0 1-1 1h-4V11H8v10H4a1 1 0 0 1-1-1Z"/><path d="M8 15h8M8 18h8M8 21h8"/>',
+    refunds: '<path d="M8 3 4 7l4 4M4 7h10a6 6 0 0 1 0 12h-3"/><path d="m11 11 3 3 3-3M14 14v5M11 16h6"/>',
+    settings: '<path d="m9.5 3-.6 2.2-2 .9-2-.6-2.4 4.2 1.6 1.6v2.4l-1.6 1.6L4.9 19l2-.6 2 .9.6 2.2h5l.6-2.2 2-.9 2 .6 2.4-4.2-1.6-1.6v-2.4l1.6-1.6L19.1 5l-2 .6-2-.9L14.5 3Z"/><circle cx="12" cy="12.2" r="3"/>',
+    sync: '<path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    arrow: '<path d="M5 12h14m-5-5 5 5-5 5"/>',
+    wallet: '<path d="M20 8H5a2 2 0 0 1 0-4h12v4M3 6v13a2 2 0 0 0 2 2h15V8M20 12h-5v5h5"/><path d="M16.5 14.5h.1"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    check: '<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
+    trend: '<path d="M4 17 10 11l4 4 6-9M14 6h6v6"/>',
+    percent: '<path d="m6 18 12-12"/><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="17" r="2.5"/>',
+    search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/>'
+  };
   function esc(value) {
     return String(value != null ? value : "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+  }
+  function icon(name) {
+    const key = Object.prototype.hasOwnProperty.call(UI_ICONS, name) ? name : "reports";
+    return '<svg class="ui-icon" data-icon="'.concat(key, '" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">').concat(UI_ICONS[key], "</svg>");
+  }
+  function buttonContent(label, iconName = "plus") {
+    return "".concat(icon(iconName), '<span class="button-label">').concat(esc(label), "</span>");
+  }
+  function primaryAction(action, label, iconName = "plus") {
+    return '<button class="button button-with-icon" type="button" data-action="'.concat(esc(action), '">').concat(buttonContent(label, iconName), "</button>");
   }
   function money(cents) {
     return "¥".concat(Domain.formatMoney(cents));
@@ -1773,25 +1800,31 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     app.exportFilename = "";
     $("#modal-root").innerHTML = "";
   }
-  function emptyState(title, detail, action = "") {
-    return '<div class="empty-state"><strong>'.concat(esc(title), "</strong><span>").concat(esc(detail), "</span>").concat(action ? '<div style="margin-top:16px">'.concat(action, "</div>") : "", "</div>");
+  function emptyState(title, detail, action = "", iconName = "reports") {
+    return '<div class="empty-state"><span class="empty-state-icon">'.concat(icon(iconName), "</span><strong>").concat(esc(title), '</strong><span class="empty-state-detail">').concat(esc(detail), "</span>").concat(action ? '<div class="empty-state-actions">'.concat(action, "</div>") : "", "</div>");
   }
   function pageHeading(eyebrow, title, subtitle, action) {
     return '<div class="page-heading"><div><div class="eyebrow">'.concat(esc(eyebrow), "</div><h1>").concat(esc(title), "</h1>").concat(subtitle ? '<p class="page-subtitle">'.concat(esc(subtitle), "</p>") : "", "</div>").concat(action || "", "</div>");
+  }
+  function statCard(label, value, foot, iconName, tone = "green", featured = false, valueClass = "money") {
+    return '<article class="stat-card accent-'.concat(esc(tone)).concat(featured ? " stat-card-featured" : "", '"><div class="stat-header"><div class="stat-label">').concat(esc(label), '</div><span class="stat-icon">').concat(icon(iconName), '</span></div><div class="stat-value ').concat(esc(valueClass), '">').concat(esc(value), '</div><div class="stat-foot">').concat(foot, "</div></article>");
+  }
+  function dashboardQuickActions() {
+    return '<section class="quick-actions-section" aria-labelledby="quick-actions-title"><div class="quick-actions-heading"><h2 id="quick-actions-title">常用操作</h2><span class="muted small">离线也能记录</span></div><div class="quick-actions">\n      <button class="quick-action" type="button" data-action="new-report"><span class="quick-action-icon">'.concat(icon("reports"), '</span><span class="quick-action-copy"><strong>新增报单</strong><span>记录商品与付款</span></span><span class="quick-action-arrow">').concat(icon("arrow"), '</span></button>\n      <button class="quick-action" type="button" data-action="new-shipment"><span class="quick-action-icon">').concat(icon("shipments"), '</span><span class="quick-action-copy"><strong>新增快递</strong><span>从库存选择商品</span></span><span class="quick-action-arrow">').concat(icon("arrow"), '</span></button>\n      <button class="quick-action" type="button" data-view="inventory"><span class="quick-action-icon">').concat(icon("inventory"), '</span><span class="quick-action-copy"><strong>查看仓库</strong><span>查看剩余商品</span></span><span class="quick-action-arrow">').concat(icon("arrow"), '</span></button>\n      <button class="quick-action" type="button" data-action="new-refund"><span class="quick-action-icon">').concat(icon("refunds"), '</span><span class="quick-action-copy"><strong>登记退款</strong><span>记录退货流水</span></span><span class="quick-action-arrow">').concat(icon("arrow"), "</span></button>\n    </div></section>");
   }
   function renderDashboard() {
     const summary = Domain.stats(app.state);
     const reports = activeReports().sort((a, b) => String(b.occurredAt).localeCompare(String(a.occurredAt))).slice(0, 5);
     const shipments = shipmentViews().sort((a, b) => String(b.shipment.shippedAt).localeCompare(String(a.shipment.shippedAt))).slice(0, 5);
-    return "".concat(pageHeading("Workspace", "总览", "收入、库存和返款状态", '<button class="button" data-action="new-report">新增报单</button>'), '\n      <section class="card-grid">\n        <article class="stat-card accent-green"><div class="stat-label">累计商品付款</div><div class="stat-value money">').concat(money(summary.totalPurchaseCents), '</div><div class="stat-foot">已扣除退款商品</div></article>\n        <article class="stat-card accent-orange"><div class="stat-label">累计快递费用</div><div class="stat-value money">').concat(money(summary.totalShippingCents), '</div><div class="stat-foot">全部有效快递</div></article>\n        <article class="stat-card accent-blue"><div class="stat-label">预计未返款</div><div class="stat-value money">').concat(money(summary.outstandingCents), '</div><div class="stat-foot"><span class="metric-pair">原始预计返款 ').concat(money(summary.expectedRefundCents), '</span><span class="metric-pair">预计返利 ').concat(money(summary.expectedRebateCents), '</span><span class="stat-subfoot"><span class="metric-pair">有 ').concat(money(summary.pendingShipmentPurchaseCents), ' 商品待发货</span></span><span class="stat-subfoot"><span class="metric-pair">未结单预计 ').concat(money(summary.pendingExpectedRefundCents), '</span><span class="metric-pair">已结单实际 ').concat(money(summary.closedActualRefundCents), '</span></span></div></article>\n        <article class="stat-card accent-green"><div class="stat-label">已返款</div><div class="stat-value money">').concat(money(summary.returnedCents), '</div><div class="stat-foot"><span class="metric-pair">已结单实际 ').concat(money(summary.closedActualRefundCents), '</span><span class="metric-pair">未结单已收 ').concat(money(summary.pendingReturnedCents), '</span></div></article>\n        <article class="stat-card accent-green"><div class="stat-label">利润</div><div class="stat-value money">').concat(money(summary.profitCents), '</div><div class="stat-foot"><span class="phrase">已结单实际</span> <span class="phrase">+ 未结单预计</span> <span class="phrase">- 商品付款</span> <span class="phrase">+ 预计返利</span></div></article>\n        <article class="stat-card accent-orange"><div class="stat-label">纯利润</div><div class="stat-value money">').concat(money(summary.pureProfitCents), '</div><div class="stat-foot">利润减快递费用</div></article>\n        <article class="stat-card accent-blue"><div class="stat-label">利率</div><div class="stat-value">').concat(percent(summary.rate), '</div><div class="stat-foot">纯利润 / 累计商品付款</div></article>\n      </section>\n      <section class="two-column">\n        <article class="panel"><div class="panel-heading"><h2>最近报单</h2><button class="link-button" data-view="reports">查看全部</button></div><div class="record-list">').concat(reports.length ? reports.map((report) => {
+    return "".concat(pageHeading("Workspace", "总览", "收入、库存和返款，一目了然"), "\n      ").concat(dashboardQuickActions(), '\n      <section class="card-grid" aria-label="经营概览">\n        ').concat(statCard("预计未返款", money(summary.outstandingCents), '<span class="metric-pair">原始预计返款 '.concat(money(summary.expectedRefundCents), '</span><span class="metric-pair">预计返利 ').concat(money(summary.expectedRebateCents), '</span><span class="stat-subfoot"><span class="metric-pair">有 ').concat(money(summary.pendingShipmentPurchaseCents), ' 商品待发货</span></span><span class="stat-subfoot"><span class="metric-pair">未结单预计 ').concat(money(summary.pendingExpectedRefundCents), '</span><span class="metric-pair">已结单实际 ').concat(money(summary.closedActualRefundCents), "</span></span>"), "clock", "green", true), "\n        ").concat(statCard("累计商品付款", money(summary.totalPurchaseCents), "已扣除退款商品", "wallet"), "\n        ").concat(statCard("累计快递费用", money(summary.totalShippingCents), "全部有效快递", "shipments", "orange"), "\n        ").concat(statCard("已返款", money(summary.returnedCents), '<span class="metric-pair">已结单实际 '.concat(money(summary.closedActualRefundCents), '</span><span class="metric-pair">未结单已收 ').concat(money(summary.pendingReturnedCents), "</span>"), "check"), "\n        ").concat(statCard("利润", money(summary.profitCents), '<span class="phrase">已结单实际</span> <span class="phrase">+ 未结单预计</span> <span class="phrase">- 商品付款</span> <span class="phrase">+ 预计返利</span>', "trend"), "\n        ").concat(statCard("纯利润", money(summary.pureProfitCents), "利润减快递费用", "trend", "orange"), "\n        ").concat(statCard("利率", percent(summary.rate), "纯利润 / 累计商品付款", "percent", "green", false, "number"), '\n      </section>\n      <section class="two-column">\n        <article class="panel"><div class="panel-heading"><h2>最近报单</h2><button class="link-button button-with-icon" type="button" data-view="reports">').concat(buttonContent("查看全部", "arrow"), '</button></div><div class="record-list">').concat(reports.length ? reports.map((report) => {
       const total = reportTotals(report.id);
       return '<div class="record-row"><div class="record-main"><div class="record-title">'.concat(esc(reportItems(report.id).map((item) => item.productName).join("、")), '</div><div class="record-meta">').concat(esc(dateText(report.occurredAt)), " · ").concat(total.quantity, ' 件</div></div><div class="record-side"><div class="money">').concat(money(total.actualPaymentCents), '</div><div class="muted record-metrics"><span class="metric-pair">返款 ').concat(money(total.expectedRefundCents), '</span><span class="metric-pair">返利 ').concat(money(total.expectedRebateCents), "</span></div></div></div>");
-    }).join("") : emptyState("还没有报单", "先录入一笔商品报单", '<button class="button button-small" data-action="new-report">新增报单</button>'), '</div></article>\n        <article class="panel"><div class="panel-heading"><h2>最近快递</h2><button class="link-button" data-view="shipments">查看全部</button></div><div class="record-list">').concat(shipments.length ? shipments.map((view) => '<div class="record-row"><div class="record-main"><div class="record-title">'.concat(esc(view.shipment.trackingNumber), '</div><div class="record-meta">').concat(esc(view.items.map((item) => item.productName).join("、")), " · ").concat(view.items.reduce((sum, item) => sum + item.quantity, 0), ' 件</div></div><div class="record-side"><div class="money">').concat(money(view.returnedCents), '</div><div class="muted record-metrics"><span class="metric-pair">商品付款 ').concat(money(view.actualPaymentCents), '</span><span class="metric-pair">预计返款 ').concat(money(view.expectedRefundCents), '</span><span class="metric-pair">返利 ').concat(money(view.expectedRebateCents), "</span></div></div></div>")).join("") : emptyState("还没有快递", "库存有商品后可以创建快递", '<button class="button button-small" data-action="new-shipment">新增快递</button>'), "</div></article>\n      </section>");
+    }).join("") : emptyState("从第一笔报单开始", "录入商品和付款，库存与收益会自动整理。", primaryAction("new-report", "新增报单"), "reports"), '</div></article>\n        <article class="panel"><div class="panel-heading"><h2>最近快递</h2><button class="link-button button-with-icon" type="button" data-view="shipments">').concat(buttonContent("查看全部", "arrow"), '</button></div><div class="record-list">').concat(shipments.length ? shipments.map((view) => '<div class="record-row"><div class="record-main"><div class="record-title">'.concat(esc(view.shipment.trackingNumber), '</div><div class="record-meta">').concat(esc(view.items.map((item) => item.productName).join("、")), " · ").concat(view.items.reduce((sum, item) => sum + item.quantity, 0), ' 件</div></div><div class="record-side"><div class="money">').concat(money(view.returnedCents), '</div><div class="muted record-metrics"><span class="metric-pair">商品付款 ').concat(money(view.actualPaymentCents), '</span><span class="metric-pair">预计返款 ').concat(money(view.expectedRefundCents), '</span><span class="metric-pair">返利 ').concat(money(view.expectedRebateCents), "</span></div></div></div>")).join("") : emptyState("还没有快递记录", "库存有商品后，就可以记录发货与返款。", primaryAction("new-shipment", "新增快递"), "shipments"), "</div></article>\n      </section>");
   }
   function reportRows() {
     const query = app.search.trim().toLowerCase();
     const rows = activeReports().filter((report) => !query || reportSearchText(report).includes(query)).sort((a, b) => String(b.occurredAt).localeCompare(String(a.occurredAt)));
-    if (!rows.length) return '<tr><td colspan="7">'.concat(emptyState("没有匹配的报单", "调整搜索条件或新增一笔报单"), "</td></tr>");
+    if (!rows.length) return '<tr><td colspan="7">'.concat(query ? emptyState("没有匹配的报单", "换个关键词，试试商品名称、原消息或时间。", "", "search") : emptyState("还没有报单", "记录第一笔商品付款，开始整理库存与收益。", primaryAction("new-report", "新增报单"), "reports"), "</td></tr>");
     return rows.map((report) => {
       const items = reportItems(report.id);
       const total = reportTotals(report.id);
@@ -1799,12 +1832,12 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }).join("");
   }
   function renderReports() {
-    return "".concat(pageHeading("Records", "报单", "商品付款、预计返款和预计返利", '<button class="button" data-action="new-report">新增报单</button>'), '\n      <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="reports" value="').concat(esc(app.search), '" placeholder="搜索商品、原消息、时间"></div><div class="toolbar-group"><span class="muted small">').concat(activeReports().length, ' 笔有效报单</span></div></div>\n      <section class="panel table-panel"><div class="table-wrap"><table class="mobile-table report-table"><thead><tr><th>时间</th><th>商品</th><th>实际付款</th><th>预计返款</th><th>预计返利</th><th>原消息</th><th>操作</th></tr></thead><tbody>').concat(reportRows(), "</tbody></table></div></section>");
+    return "".concat(pageHeading("Records", "报单", "商品付款、预计返款和预计返利", primaryAction("new-report", "新增报单")), '\n      <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="reports" value="').concat(esc(app.search), '" placeholder="搜索商品、原消息、时间"></div><div class="toolbar-group"><span class="muted small">').concat(activeReports().length, ' 笔有效报单</span></div></div>\n      <section class="panel table-panel"><div class="table-wrap"><table class="mobile-table report-table"><thead><tr><th>时间</th><th>商品</th><th>实际付款</th><th>预计返款</th><th>预计返利</th><th>原消息</th><th>操作</th></tr></thead><tbody>').concat(reportRows(), "</tbody></table></div></section>");
   }
   function shipmentRows() {
     const query = app.search.trim().toLowerCase();
     const rows = shipmentViews().filter((view) => !query || shipmentSearchText(view).includes(query)).sort((a, b) => String(b.shipment.shippedAt).localeCompare(String(a.shipment.shippedAt)));
-    if (!rows.length) return '<tr><td colspan="10">'.concat(emptyState("没有匹配的快递", "创建一笔快递后会从剩余仓库自动扣减"), "</td></tr>");
+    if (!rows.length) return '<tr><td colspan="10">'.concat(query ? emptyState("没有匹配的快递", "换个关键词，试试快递单号、商品或备注。", "", "search") : emptyState("还没有快递记录", "从库存选择商品，发货后在这里跟进返款。", primaryAction("new-shipment", "新增快递"), "shipments"), "</td></tr>");
     return rows.map((view) => {
       const shipment = view.shipment;
       const quantity = view.items.reduce((sum, item) => sum + item.quantity, 0);
@@ -1817,18 +1850,18 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }).join("");
   }
   function renderShipments() {
-    return "".concat(pageHeading("Fulfillment", "快递", "从剩余仓库按先进先出分配商品", '<button class="button" data-action="new-shipment">新增快递</button>'), '\n      <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="shipments" value="').concat(esc(app.search), '" placeholder="搜索单号、商品、备注"></div><div class="toolbar-group"><span class="muted small">').concat(shipmentViews().length, ' 笔有效快递</span></div></div>\n      <section class="panel table-panel"><div class="table-wrap"><table class="mobile-table shipment-table"><thead><tr><th>发出时间</th><th>单号</th><th>快递内容</th><th>所含商品实际付款</th><th>快递价格</th><th>预计返款</th><th>预计返利</th><th>实际返款</th><th>状态</th><th>操作</th></tr></thead><tbody>').concat(shipmentRows(), "</tbody></table></div></section>");
+    return "".concat(pageHeading("Fulfillment", "快递", "从剩余仓库按先进先出分配商品", primaryAction("new-shipment", "新增快递")), '\n      <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="shipments" value="').concat(esc(app.search), '" placeholder="搜索单号、商品、备注"></div><div class="toolbar-group"><span class="muted small">').concat(shipmentViews().length, ' 笔有效快递</span></div></div>\n      <section class="panel table-panel"><div class="table-wrap"><table class="mobile-table shipment-table"><thead><tr><th>发出时间</th><th>单号</th><th>快递内容</th><th>所含商品实际付款</th><th>快递价格</th><th>预计返款</th><th>预计返利</th><th>实际返款</th><th>状态</th><th>操作</th></tr></thead><tbody>').concat(shipmentRows(), "</tbody></table></div></section>");
   }
   function renderInventory() {
     const lots = Domain.inventoryLots(app.state);
     const aggregate = Domain.aggregateInventory(app.state);
     const availableQuantity = lots.reduce((sum, lot) => sum + lot.availableQuantity, 0);
     const availableValue = lots.reduce((sum, lot) => sum + lot.availableActualPaymentCents, 0);
-    return "".concat(pageHeading("Inventory", "仓库", "当前未发快递、未退款的商品批次", '<button class="button" data-action="new-refund">登记退款</button>'), '\n      <section class="stock-summary"><div class="panel"><div class="muted small">可用商品种类</div><div class="summary-value">').concat(aggregate.length, '</div></div><div class="panel"><div class="muted small">可用商品数量</div><div class="summary-value number">').concat(availableQuantity, '</div></div><div class="panel"><div class="muted small">可用商品成本</div><div class="summary-value money">').concat(money(availableValue), '</div></div></section>\n      <section class="panel table-panel"><div class="panel-heading"><h2>库存批次</h2><span class="muted small">按报单时间排序</span></div><div class="table-wrap"><table class="mobile-table inventory-table"><thead><tr><th>商品</th><th>报单时间</th><th>批次数量</th><th>剩余</th><th>剩余成本</th><th>剩余预计收益</th><th>操作</th></tr></thead><tbody>').concat(lots.length ? lots.map((lot) => "<tr><td><strong>".concat(esc(lot.productName), "</strong></td><td>").concat(esc(dateText(lot.sourceDate)), '</td><td class="number">').concat(lot.quantity, '</td><td class="number"><span class="tag tag-green">').concat(lot.availableQuantity, '</span></td><td class="money">').concat(money(lot.availableActualPaymentCents), '</td><td class="money">').concat(money(lot.availableExpectedRefundCents + lot.availableExpectedRebateCents), '</td><td><button class="link-button" data-action="new-refund" data-id="').concat(esc(lot.reportItemId), '">退款</button></td></tr>')).join("") : '<tr><td colspan="7">'.concat(emptyState("仓库为空", "新增报单后会在这里形成可用库存"), "</td></tr>"), "</tbody></table></div></section>");
+    return "".concat(pageHeading("Inventory", "仓库", "当前未发快递、未退款的商品批次", primaryAction("new-refund", "登记退款", "refunds")), '\n      <section class="stock-summary"><div class="panel"><div class="muted small">可用商品种类</div><div class="summary-value">').concat(aggregate.length, '</div></div><div class="panel"><div class="muted small">可用商品数量</div><div class="summary-value number">').concat(availableQuantity, '</div></div><div class="panel"><div class="muted small">可用商品成本</div><div class="summary-value money">').concat(money(availableValue), '</div></div></section>\n      <section class="panel table-panel"><div class="panel-heading"><h2>库存批次</h2><span class="muted small">按报单时间排序</span></div><div class="table-wrap"><table class="mobile-table inventory-table"><thead><tr><th>商品</th><th>报单时间</th><th>批次数量</th><th>剩余</th><th>剩余成本</th><th>剩余预计收益</th><th>操作</th></tr></thead><tbody>').concat(lots.length ? lots.map((lot) => "<tr><td><strong>".concat(esc(lot.productName), "</strong></td><td>").concat(esc(dateText(lot.sourceDate)), '</td><td class="number">').concat(lot.quantity, '</td><td class="number"><span class="tag tag-green">').concat(lot.availableQuantity, '</span></td><td class="money">').concat(money(lot.availableActualPaymentCents), '</td><td class="money">').concat(money(lot.availableExpectedRefundCents + lot.availableExpectedRebateCents), '</td><td><button class="link-button" data-action="new-refund" data-id="').concat(esc(lot.reportItemId), '">退款</button></td></tr>')).join("") : '<tr><td colspan="7">'.concat(emptyState("仓库为空", "新增报单后，可发货或退款的商品会出现在这里。", primaryAction("new-report", "新增报单"), "inventory"), "</td></tr>"), "</tbody></table></div></section>");
   }
   function refundRows() {
     const rows = app.state.refunds.filter(Domain.isActive).sort((a, b) => String(b.refundedAt).localeCompare(String(a.refundedAt)));
-    if (!rows.length) return '<tr><td colspan="7">'.concat(emptyState("还没有退款记录", "从仓库选择商品登记退款"), "</td></tr>");
+    if (!rows.length) return '<tr><td colspan="7">'.concat(emptyState("还没有退款记录", "需要退货时，从可用库存选择商品登记。", '<button class="button button-with-icon" type="button" data-view="inventory">'.concat(buttonContent("查看仓库", "inventory"), "</button>"), "refunds"), "</td></tr>");
     return rows.map((refund) => {
       const item = app.state.reportItems.find((row) => row.id === refund.reportItemId);
       const report = item && app.state.reports.find((row) => row.id === item.reportId);
@@ -1836,7 +1869,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }).join("");
   }
   function renderRefunds() {
-    return "".concat(pageHeading("Returns", "退款", "从可用库存退出商品并保留流水", '<button class="button" data-action="new-refund">登记退款</button>'), '\n      <section class="panel table-panel"><div class="table-wrap"><table class="mobile-table refund-table"><thead><tr><th>退款时间</th><th>商品批次</th><th>数量</th><th>退款金额</th><th>备注</th><th>状态</th><th>操作</th></tr></thead><tbody>').concat(refundRows(), "</tbody></table></div></section>");
+    return "".concat(pageHeading("Returns", "退款", "从可用库存退出商品并保留流水", primaryAction("new-refund", "登记退款", "refunds")), '\n      <section class="panel table-panel"><div class="table-wrap"><table class="mobile-table refund-table"><thead><tr><th>退款时间</th><th>商品批次</th><th>数量</th><th>退款金额</th><th>备注</th><th>状态</th><th>操作</th></tr></thead><tbody>').concat(refundRows(), "</tbody></table></div></section>");
   }
   function operationLabel(type) {
     return {
@@ -1967,7 +2000,12 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       const current = settingsFromForm();
       if (current.apiBase !== app.settings.apiBase || current.token !== app.settings.token) settingsDraft = current;
     }
-    $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === app.view));
+    $$(".nav-item").forEach((item) => {
+      const active = item.dataset.view === app.view;
+      item.classList.toggle("active", active);
+      if (active) item.setAttribute("aria-current", "page");
+      else item.removeAttribute("aria-current");
+    });
     const main = $("#main-content");
     if (!main) return;
     if (app.view === "dashboard") main.innerHTML = renderDashboard();

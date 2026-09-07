@@ -9,6 +9,7 @@
     "dev": "node --watch server.js",
     "predev": "npm run build:web",
     "build:web": "node scripts/build-web-assets.js",
+    "build:icons": "java scripts/BuildIconAssets.java",
     "pretest": "npm run build:web",
     "test": "node --test test/*.test.js",
     "test:legacy": "ORDER_REPORT_LEGACY_TEST=1 node --test test/app-sync.test.js",

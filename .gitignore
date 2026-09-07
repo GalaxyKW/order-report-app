@@ -14,5 +14,6 @@ android/local.properties
 android/keystore.properties
 *.apk
 *.aab
+artifacts/
 .DS_Store
 npm-debug.log*

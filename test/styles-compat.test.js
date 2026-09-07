@@ -76,7 +76,7 @@ test('modern and legacy CSS keep phone controls and dialogs reachable', {
           reports[index] = {
             ...entry, viewportWidth:doc.documentElement.clientWidth, backdrop:rect('.modal-backdrop'), main:rect('.main-content'), toast:rect('.toast'),
             padding:parseFloat(style('.main-content').paddingLeft), brandGap:second.left-first.right,
-            gridGap:entry.width<=460 ? cards[1].top-cards[0].bottom : cards[1].left-cards[0].right,
+            gridGap:entry.width<=360 ? cards[1].top-cards[0].bottom : cards[1].left-cards[0].right,
             printGap:entry.width<=620 ? prints[0].top-prints[1].bottom : prints[1].left-prints[0].right,
             actions, safeTop:style('html').getPropertyValue('--safe-top').trim(),
             controls:Array.from(doc.querySelectorAll('.top-actions button, .backup-actions button, .form-actions button, .field input')).map(node => ({right:node.getBoundingClientRect().right, left:node.getBoundingClientRect().left, width:node.clientWidth, scrollWidth:node.scrollWidth})),

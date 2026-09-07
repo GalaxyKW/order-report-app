@@ -63,6 +63,10 @@ test('HTTP API validates input, keeps idempotent operations, and removes its loc
   assert.equal(health.status, 200);
   assert.equal(health.body.ok, true);
 
+  const appIcon = await request('GET', '/icons/app-icon-64.png');
+  assert.equal(appIcon.status, 200);
+  assert.equal(appIcon.headers['Content-Type'], 'image/png');
+
   const unauthorized = await request('GET', '/api/sync/pull');
   assert.equal(unauthorized.status, 401);
 

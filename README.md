@@ -118,6 +118,10 @@ Gradle 的 `preBuild` 也会自动执行资源同步，避免直接运行 `assem
 
 0.1.2 修正了系统栏控制器在窗口创建前被读取的启动时序问题，并保护异常导出恢复状态。Debug 版多一个“报单管家诊断”图标，不加载 WebView；如果主界面仍退出，可用该入口复制本机启动诊断。原生跨 API 生命周期测试和反馈步骤见上述设备验收文档。
 
+0.1.3 更新了「报单 + 包裹」应用图标、六分类图文导航、首页快捷操作和金额卡片层级；保留本机存储、同步保护和业务计算。图标源文件、生成提示词及重建方式见 [`docs/APP_VISUAL_DESIGN.md`](docs/APP_VISUAL_DESIGN.md)。
+
+可选真实浏览器布局回归：`ORDER_REPORT_CSS_BROWSER=/usr/bin/google-chrome node --test test/styles-compat.test.js test/ui-layout.test.js`。测试只使用隔离的静态页面和虚构数据；设置 `ORDER_REPORT_UI_SCREENSHOTS=/tmp/order-report-ui-preview` 可保存预览截图。
+
 APP 是无第三方运行库的 WebView 壳，数据由内置前端保存到 Android WebView 本地存储。项目包含 Gradle Wrapper，纯命令行环境不需要安装 Android Studio。
 
 完整的环境准备、Debug/Release 构建和安装步骤见 [`docs/APK_BUILD.md`](docs/APK_BUILD.md)。

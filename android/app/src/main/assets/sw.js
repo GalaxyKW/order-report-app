@@ -1,5 +1,5 @@
-const CACHE_NAME = 'order-report-shell-v9';
-const SHELL = ['./', './index.html', './styles.css', './compat.js', './client.js', './manifest.webmanifest'];
+const CACHE_NAME = 'order-report-shell-v10';
+const SHELL = ['./', './index.html', './styles.css', './compat.js', './client.js', './manifest.webmanifest', './icons/app-icon.png', './icons/app-icon-192.png', './icons/app-icon-64.png'];
 const SHELL_URLS = new Set(SHELL.map((path) => new URL(path, self.location.href).href));
 
 self.addEventListener('install', (event) => {

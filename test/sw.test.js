@@ -99,3 +99,12 @@ test('the service worker still refreshes and caches an explicit shell asset', as
   assert.deepEqual(harness.fetches, ['https://app.example.test/app/client.js']);
   assert.deepEqual(harness.cacheWrites, ['https://app.example.test/app/client.js']);
 });
+
+test('launcher and header icons are part of the offline shell', async () => {
+  for (const name of ['app-icon.png', 'app-icon-192.png', 'app-icon-64.png']) {
+    const harness = createHarness();
+    const url = `https://app.example.test/app/icons/${name}`;
+    assert.notEqual(await dispatchFetch(harness, request(url)), null);
+    assert.deepEqual(harness.cacheWrites, [url]);
+  }
+});
