@@ -2,6 +2,28 @@
 
 单人使用的 Android 报单、库存、快递和返款记录工具。APP 在无法连接服务器时仍然可以录入和查询，恢复网络后会自动同步。
 
+## 界面展示
+
+以下为 **0.1.4 界面的真实渲染截图**。商品、金额和 `DEMO` 单号均为虚构演示数据，不含真实订单、服务器地址或同步令牌。手机图展示响应式页面，不包含 Android 系统状态栏。
+
+### 经营总览 · 桌面
+
+快捷录入、库存与返款概况、利润统计集中展示。
+
+![桌面经营总览：快捷操作、返款与利润卡片、最近报单和快递](docs/screenshots/dashboard-desktop.png)
+
+### 随手记录 · 手机
+
+<p align="center">
+  <a href="docs/screenshots/dashboard-mobile.png"><img src="docs/screenshots/dashboard-mobile.png" alt="手机总览：快捷入口、金额卡片与底部分类导航" width="250"></a>
+  <a href="docs/screenshots/reports-mobile.png"><img src="docs/screenshots/reports-mobile.png" alt="手机报单：商品信息、预计与实际返利，以及调整入口" width="250"></a>
+  <a href="docs/screenshots/rebate-mobile.png"><img src="docs/screenshots/rebate-mobile.png" alt="实际返利编辑：自定义金额、恢复默认及退款后的计入金额" width="250"></a>
+</p>
+
+从左到右：**总览 → 报单管理 → 调整实际返利**。点击图片可查看原图。
+
+截图生成方式与隐私隔离说明见 [`docs/screenshots/README.md`](docs/screenshots/README.md)。
+
 ## 功能
 
 - 报单：时间、原消息、多个商品行、数量、商品备注、实际付款、预计返款、预计返利。

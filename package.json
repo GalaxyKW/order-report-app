@@ -10,6 +10,8 @@
     "predev": "npm run build:web",
     "build:web": "node scripts/build-web-assets.js",
     "build:icons": "java scripts/BuildIconAssets.java",
+    "prescreenshots:readme": "npm run build:web",
+    "screenshots:readme": "node scripts/capture-readme.js",
     "pretest": "npm run build:web",
     "test": "node --test test/*.test.js",
     "test:legacy": "ORDER_REPORT_LEGACY_TEST=1 node --test test/app-sync.test.js",
