@@ -13,7 +13,8 @@ assert.notEqual(startupIndex, -1, 'presentation harness must stop before storage
 const presentationSource = `${source.slice(0, startupIndex)}
   window.__ui = {
     app, icon, emptyState, dashboardQuickActions, renderDashboard, renderReports,
-    renderShipments, renderInventory, renderRefunds, renderSettings, render, navigateView,
+    renderShipments, renderInventory, renderRefunds, renderSettings, render, navigateView, shipmentEditor,
+    rebateEditor, collectRebateForm, updateRebatePreview, reportItemEditorRow, collectReportForm,
   };
 })();`;
 const views = ['dashboard', 'reports', 'shipments', 'inventory', 'refunds', 'settings'];
@@ -32,14 +33,25 @@ function createHarness() {
     };
   });
   const main = { innerHTML: '' };
+  const modal = { innerHTML: '' };
   const window = { OrderDomain: Domain };
   const document = {
     addEventListener() {},
-    querySelector(selector) { return selector === '#main-content' ? main : null; },
+    querySelector(selector) {
+      if (selector === '#main-content') return main;
+      if (selector === '#modal-root') return modal;
+      return null;
+    },
     querySelectorAll(selector) { return selector === '.nav-item' ? navigation : []; },
   };
-  vm.runInNewContext(presentationSource, { window, document }, { filename: appPath });
-  return { ...window.__ui, navigation, main };
+  const context = vm.createContext({ window, document });
+  vm.runInContext(presentationSource, context, { filename: appPath });
+  return {
+    ...window.__ui, navigation, main, modal,
+    intrinsicProperties() {
+      return vm.runInContext('JSON.stringify([Object.getOwnPropertyNames(Object.prototype), Object.getOwnPropertyNames(Object), Object.getOwnPropertyNames(Object.prototype.toString)])', context);
+    },
+  };
 }
 
 function sampleState() {
@@ -168,4 +180,184 @@ test('display helpers keep untrusted labels and product text escaped', () => {
   const html = ui.renderDashboard();
   assert.ok(!html.includes(unsafe));
   assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'));
+});
+
+for (const productName of ['普通商品', '__proto__', 'constructor', 'toString']) {
+  test(`editing a shipment safely groups the product name ${productName}`, () => {
+    const ui = createHarness();
+    ui.app.state = sampleState();
+    ui.app.state.shipments[0].closedAt = null;
+    ui.app.state.reportItems[0].productName = productName;
+    // A second allocation for the same product must still become one row.
+    ui.app.state.shipmentItems.push({
+      ...ui.app.state.shipmentItems[0], id: 'ui_extra_allocation', quantity: 1,
+    });
+    assert.equal(Domain.isStateSnapshot(ui.app.state), true);
+    const stateBefore = JSON.stringify(ui.app.state);
+    const intrinsicsBefore = ui.intrinsicProperties();
+    ui.shipmentEditor('ui_shipment');
+    const rows = ui.modal.innerHTML.match(/<tr class="shipment-item-editor">[\s\S]*?<\/tr>/g) || [];
+    assert.equal(rows.length, 1, 'all existing allocations must remain visible');
+    assert.ok(rows[0].includes(`<option value="${productName}" selected>`), 'the existing product must stay selected');
+    assert.match(rows[0], /data-field="quantity"[^>]*value="3"/);
+    assert.equal(ui.intrinsicProperties(), intrinsicsBefore, 'product names must not modify object or function prototypes');
+    assert.equal(JSON.stringify(ui.app.state), stateBefore, 'opening the editor must not change business data');
+  });
+}
+
+function rebateForm(entries = [{ id: 'ui_item', useExpected: true, value: '4.00' }]) {
+  const rows = entries.map((entry) => {
+    const controls = {
+      '[data-field="useExpected"]': { checked: entry.useExpected },
+      '[data-field="actualRebateCents"]': { value: entry.value, disabled: entry.useExpected, dataset: {} },
+      '[data-rebate-preview]': { className: '', textContent: '' },
+    };
+    return { dataset: { itemId: entry.id }, controls, querySelector(selector) { return controls[selector] || null; } };
+  });
+  return {
+    elements: { id: { value: 'ui_report' } }, rows,
+    querySelectorAll(selector) { return selector === '.rebate-item-editor' ? rows : []; },
+  };
+}
+
+function applyRebate(state, payload) {
+  return Domain.applyOperation(state, {
+    type: 'report.rebate.update', payload, opId: 'ui_rebate_op', clientId: 'ui_fixture',
+  }, { now: '2026-09-14T10:00:00.000Z' }).state;
+}
+
+test('the rebate editor explains original-batch amounts and remains available after shipment closure', () => {
+  const ui = createHarness();
+  ui.app.state = sampleState();
+  assert.ok(ui.app.state.shipments[0].closedAt);
+  assert.match(ui.renderReports(), /data-action="edit-rebate" data-id="ui_report"/);
+  const before = JSON.stringify(ui.app.state);
+  ui.rebateEditor('ui_report');
+  assert.match(ui.modal.innerHTML, /form data-form="rebate"/);
+  assert.match(ui.modal.innerHTML, /data-field="useExpected" checked/);
+  assert.match(ui.modal.innerHTML, /data-field="actualRebateCents"[^>]*value="4\.00"[^>]*disabled/);
+  assert.match(ui.modal.innerHTML, /原数量 4 件/);
+  assert.match(ui.modal.innerHTML, /已退款 1 件/);
+  assert.match(ui.modal.innerHTML, /整批预计 ¥4\.00/);
+  assert.match(ui.modal.innerHTML, /计入利润：¥3\.00/);
+  assert.match(ui.modal.innerHTML, /原始整批商品的总返利/);
+  assert.match(ui.modal.innerHTML, /出库或快递结单后仍可调整/);
+  assert.equal(JSON.stringify(ui.app.state), before);
+});
+
+test('custom zero survives reopening and a default reset restores forecast-based profit', () => {
+  const ui = createHarness();
+  ui.app.state = sampleState();
+  const originalProfit = Domain.stats(ui.app.state).profitCents;
+  const custom = ui.collectRebateForm(rebateForm([{ id: 'ui_item', useExpected: false, value: '0.00' }]));
+  assert.equal(custom.items[0].actualRebateCents, 0);
+  ui.app.state = applyRebate(ui.app.state, custom);
+  assert.equal(Domain.stats(ui.app.state).profitCents, originalProfit - 300);
+  assert.equal(Domain.stats(ui.app.state).expectedRebateCents, 300);
+  ui.rebateEditor('ui_report');
+  assert.match(ui.modal.innerHTML, /data-field="actualRebateCents"[^>]*value="0\.00"/);
+  assert.doesNotMatch(ui.modal.innerHTML, /data-field="useExpected" checked/);
+  assert.match(ui.modal.innerHTML, /计入利润：¥0\.00/);
+  const reset = ui.collectRebateForm(rebateForm([{ id: 'ui_item', useExpected: true, value: 'ignored disabled input' }]));
+  assert.equal(reset.items[0].actualRebateCents, null);
+  ui.app.state = applyRebate(ui.app.state, reset);
+  assert.equal(Object.prototype.hasOwnProperty.call(ui.app.state.reportItems[0], 'actualRebateCents'), false);
+  assert.equal(Domain.stats(ui.app.state).profitCents, originalProfit);
+});
+
+test('rebate form collects multiple items as integer cents without changing the original report form', () => {
+  const ui = createHarness();
+  const payload = ui.collectRebateForm(rebateForm([
+    { id: 'ui_item', useExpected: false, value: '1.23' },
+    { id: 'ui_second_item', useExpected: true, value: '' },
+  ]));
+  assert.equal(JSON.stringify(payload), JSON.stringify({
+    id: 'ui_report', items: [{ id: 'ui_item', actualRebateCents: 123 }, { id: 'ui_second_item', actualRebateCents: null }],
+  }));
+  const item = sampleState().reportItems[0];
+  assert.doesNotMatch(ui.reportItemEditorRow({ ...item, actualRebateCents: 0 }), /data-field="actualRebateCents"/);
+  const fields = { productName: '测试商品', note: '', quantity: '4', actualPaymentCents: '40.00', expectedRefundCents: '48.00', expectedRebateCents: '4.00' };
+  const row = {
+    dataset: { itemId: 'ui_item' },
+    querySelector(selector) { return { value: fields[selector.match(/data-field="([^\"]+)"/)[1]] }; },
+  };
+  const reportForm = {
+    elements: { id: { value: 'ui_report' }, occurredAt: { value: '2026-09-01T09:00' }, originalMessage: { value: '' } },
+    querySelectorAll() { return [row]; },
+  };
+  assert.equal(Object.prototype.hasOwnProperty.call(ui.collectReportForm(reportForm).items[0], 'actualRebateCents'), false);
+});
+
+test('invalid custom rebate input is rejected without treating an empty amount as zero', () => {
+  const ui = createHarness();
+  ui.app.state = sampleState();
+  const before = JSON.stringify(ui.app.state);
+  for (const value of ['', ' ', '-1', '1.001', 'NaN', '1e2', '90071992547409.92']) {
+    assert.throws(() => ui.collectRebateForm(rebateForm([{ id: 'ui_item', useExpected: false, value }])), /实际返利/);
+  }
+  assert.equal(JSON.stringify(ui.app.state), before);
+});
+
+test('rebate previews honor refunds, preserve custom drafts across toggles and show invalid amounts', () => {
+  const ui = createHarness();
+  ui.app.state = sampleState();
+  const form = rebateForm([{ id: 'ui_item', useExpected: false, value: '2.00' }]);
+  const controls = form.rows[0].controls;
+  const input = controls['[data-field="actualRebateCents"]'];
+  const checkbox = controls['[data-field="useExpected"]'];
+  const preview = controls['[data-rebate-preview]'];
+  ui.updateRebatePreview(form);
+  assert.match(preview.textContent, /计入利润：¥1\.50/);
+  checkbox.checked = true;
+  ui.updateRebatePreview(form);
+  assert.equal(input.disabled, true);
+  assert.equal(input.value, '4.00');
+  assert.match(preview.textContent, /计入利润：¥3\.00/);
+  checkbox.checked = false;
+  ui.updateRebatePreview(form);
+  assert.equal(input.disabled, false);
+  assert.equal(input.value, '2.00');
+  input.value = '0';
+  ui.updateRebatePreview(form);
+  assert.match(preview.textContent, /计入利润：¥0\.00/);
+  input.value = '-2';
+  ui.updateRebatePreview(form);
+  assert.equal(preview.className, 'rebate-preview rebate-preview-error');
+  assert.match(preview.textContent, /实际返利/);
+});
+
+test('actual rebate changes update existing statistics and keep forecasts visible', () => {
+  const ui = createHarness();
+  ui.app.state = applyRebate(sampleState(), { id: 'ui_report', items: [{ id: 'ui_item', actualRebateCents: 200 }] });
+  const dashboard = ui.renderDashboard();
+  assert.equal((dashboard.match(/<article class="stat-card /g) || []).length, 7);
+  assert.match(dashboard, /实际返利 ¥1\.50/);
+  assert.match(dashboard, /<span class="phrase">\+ 实际返利<\/span>/);
+  assert.doesNotMatch(dashboard, /<span class="phrase">\+ 预计返利<\/span>/);
+  const report = ui.renderReports();
+  assert.match(report, /<th>返利（整批）<\/th>/);
+  assert.match(report, /预计 <span class="money">¥4\.00<\/span>/);
+  assert.match(report, /实际 <span class="money">¥2\.00<\/span>/);
+  const shipment = ui.renderShipments();
+  assert.match(shipment, /<th>返利<\/th>/);
+  assert.match(shipment, /实际 <span class="money">¥1\.00<\/span>/);
+  assert.match(ui.renderInventory(), /剩余实际返利 <span class="money">¥0\.50<\/span>/);
+});
+
+test('unsupported rebate operations explain server upgrade and fresh-id retry without changing local data', () => {
+  const ui = createHarness();
+  ui.app.state = applyRebate(sampleState(), { id: 'ui_report', items: [{ id: 'ui_item', actualRebateCents: 0 }] });
+  ui.app.queue = [{
+    opId: 'rebate_rejected', type: 'report.rebate.update', createdAt: '2026-09-14T10:00:00.000Z',
+    payload: { id: 'ui_report', items: [{ id: 'ui_item', actualRebateCents: 0 }] },
+    syncError: '不支持的操作类型: report.rebate.update',
+  }];
+  const before = JSON.stringify({ state: ui.app.state, queue: ui.app.queue });
+  const settings = ui.renderSettings();
+  assert.match(settings, /服务器版本尚不支持实际返利/);
+  assert.match(settings, /请先升级服务器/);
+  assert.match(settings, /换新编号重试/);
+  assert.match(settings, /不要通过下载覆盖/);
+  assert.match(settings, /调整实际返利/);
+  assert.equal(JSON.stringify({ state: ui.app.state, queue: ui.app.queue }), before);
 });

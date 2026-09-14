@@ -383,11 +383,23 @@ public final class MainActivity extends Activity {
     }
 
     private boolean isAppAsset(Uri uri) {
-        return uri != null
-                && "file".equals(uri.getScheme())
-                && uri.getAuthority() == null
-                && uri.getPath() != null
-                && uri.getPath().startsWith("/android_asset/");
+        if (uri == null || !"file".equals(uri.getScheme())) return false;
+        String authority = uri.getAuthority();
+        if (authority != null && !authority.isEmpty()) return false;
+        String path = uri.getPath();
+        if (path == null || !path.startsWith("/android_asset/")) return false;
+        // Uri decodes the path independently of its query/fragment. Reject
+        // traversal instead of normalizing it into a different asset. A
+        // remaining '%' could become another escape after a second decode.
+        if (path.indexOf('\\') >= 0 || path.indexOf('%') >= 0) return false;
+        for (String segment : path.split("/")) {
+            if (".".equals(segment) || "..".equals(segment)) return false;
+        }
+        for (int index = 0; index < path.length(); index++) {
+            char character = path.charAt(index);
+            if (character <= 0x1F || character == 0x7F) return false;
+        }
+        return true;
     }
 
     private static boolean isWritableContentUri(Uri uri) {

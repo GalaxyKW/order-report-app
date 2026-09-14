@@ -47,6 +47,7 @@
       && integer(row.actualPaymentCents)
       && integer(row.expectedRefundCents)
       && integer(row.expectedRebateCents)
+      && (row.actualRebateCents == null || integer(row.actualRebateCents))
       && timestamps(row)
       && status(row.status))) return false;
     if (!value.shipments.every((row) => string(row.id)
@@ -214,6 +215,14 @@
 
   function formatMoney(cents) {
     const number = Number(cents || 0);
+    if (Number.isSafeInteger(number)) {
+      // Dividing large integer cents by 100 can round away a cent before
+      // toFixed runs. Decimal slicing preserves every safe-integer amount.
+      const digits = String(Math.abs(number));
+      const yuan = digits.length > 2 ? digits.slice(0, -2) : '0';
+      const fraction = digits.length > 1 ? digits.slice(-2) : `0${digits}`;
+      return `${number < 0 ? '-' : ''}${yuan}.${fraction}`;
+    }
     return (number / 100).toFixed(2);
   }
 
@@ -318,6 +327,12 @@
       .reduce((sum, row) => sum + Number(row.quantity || 0), 0);
   }
 
+  // Optional override for the original report-item batch, before refunds.
+  // Missing/null means "follow the full forecast"; an explicit zero is real.
+  function actualRebateForItem(item) {
+    return item?.actualRebateCents ?? item?.expectedRebateCents ?? 0;
+  }
+
   function refundSortKey(refund) {
     return [refund.createdAt || '', refund.refundedAt || ''].join('\u0000');
   }
@@ -346,12 +361,13 @@
 
   function allocationFinancialValues(source, quantityBefore, quantity) {
     if (!source) {
-      return { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 };
+      return { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0, actualRebateCents: 0 };
     }
     return {
       actualPaymentCents: amountForTailQuantity(source.actualPaymentCents, source.quantity, quantityBefore, quantity),
       expectedRefundCents: amountForTailQuantity(source.expectedRefundCents, source.quantity, quantityBefore, quantity),
       expectedRebateCents: amountForTailQuantity(source.expectedRebateCents, source.quantity, quantityBefore, quantity),
+      actualRebateCents: amountForTailQuantity(actualRebateForItem(source), source.quantity, quantityBefore, quantity),
     };
   }
 
@@ -378,6 +394,37 @@
       shippedByItem.set(allocation.reportItemId, quantityBefore + Number(allocation.quantity || 0));
     }
     return valuesByAllocation;
+  }
+
+  function closedAllocationFinancialSnapshot(state) {
+    const closedShipmentIds = new Set(state.shipments
+      .filter((shipment) => isActive(shipment) && shipment.closedAt)
+      .map((shipment) => shipment.id));
+    const snapshot = new Map();
+    if (!closedShipmentIds.size) return snapshot;
+    const values = shipmentAllocationFinancialMap(state);
+    for (const allocation of state.shipmentItems) {
+      if (isActive(allocation) && closedShipmentIds.has(allocation.shipmentId)) {
+        snapshot.set(allocation.id, {
+          shipmentId: allocation.shipmentId,
+          values: values.get(allocation.id),
+        });
+      }
+    }
+    return snapshot;
+  }
+
+  function ensureClosedAllocationsUnchanged(before, state) {
+    if (!before.size) return;
+    const after = closedAllocationFinancialSnapshot(state);
+    const fields = ['actualPaymentCents', 'expectedRefundCents', 'expectedRebateCents', 'actualRebateCents'];
+    for (const [id, previous] of before) {
+      const current = after.get(id);
+      if (!current || current.shipmentId !== previous.shipmentId
+        || fields.some((field) => current.values?.[field] !== previous.values?.[field])) {
+        throw new Error('该操作会改变已结单快递的金额分摊，请先撤销相关快递结单');
+      }
+    }
   }
 
   function previewShipmentAllocations(state, allocations, options = {}) {
@@ -419,10 +466,11 @@
       if (allocation.shipmentId === excludeShipmentId) continue;
       const values = allocationValues.get(allocation.id);
       const current = shippedValuesByItem.get(allocation.reportItemId)
-        || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 };
+        || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0, actualRebateCents: 0 };
       current.actualPaymentCents += Number(values?.actualPaymentCents || 0);
       current.expectedRefundCents += Number(values?.expectedRefundCents || 0);
       current.expectedRebateCents += Number(values?.expectedRebateCents || 0);
+      current.actualRebateCents += Number(values?.actualRebateCents || 0);
       shippedValuesByItem.set(allocation.reportItemId, current);
     }
     return state.reportItems
@@ -431,7 +479,7 @@
         const shipped = shipmentItemQuantity(state, item.id, excludeShipmentId);
         const refunded = refundQuantity(state, item.id);
         const shippedValues = shippedValuesByItem.get(item.id)
-          || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 };
+          || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0, actualRebateCents: 0 };
         return {
           reportItemId: item.id,
           reportId: item.reportId,
@@ -445,6 +493,7 @@
           actualPaymentCents: Number(item.actualPaymentCents || 0),
           expectedRefundCents: Number(item.expectedRefundCents || 0),
           expectedRebateCents: Number(item.expectedRebateCents || 0),
+          actualRebateCents: actualRebateForItem(item),
           availableActualPaymentCents: Math.max(Number(item.actualPaymentCents || 0)
             - amountForQuantity(item.actualPaymentCents, item.quantity, refunded)
             - shippedValues.actualPaymentCents, 0),
@@ -454,6 +503,9 @@
           availableExpectedRebateCents: Math.max(Number(item.expectedRebateCents || 0)
             - amountForQuantity(item.expectedRebateCents, item.quantity, refunded)
             - shippedValues.expectedRebateCents, 0),
+          availableActualRebateCents: Math.max(actualRebateForItem(item)
+            - amountForQuantity(actualRebateForItem(item), item.quantity, refunded)
+            - shippedValues.actualRebateCents, 0),
         };
       })
       .filter((row) => row.availableQuantity > 0)
@@ -505,6 +557,9 @@
 
   function validateItemPayload(raw, idFactory) {
     const item = raw || {};
+    if (Object.prototype.hasOwnProperty.call(item, 'actualRebateCents')) {
+      throw new Error('实际返利请通过“修改返利”单独保存');
+    }
     const productName = text(item.productName, '物品名称');
     const quantity = asPositiveInt(item.quantity, `${productName} 数量`);
     return {
@@ -608,6 +663,34 @@
     report.updatedAt = now;
     for (const item of state.reportItems.filter((row) => row.reportId === report.id)) item.status = 'void';
     return { state, result: { id: report.id } };
+  }
+
+  function updateReportRebate(state, payload, now) {
+    const report = reportById(state, payload.id);
+    if (!report) throw new Error('报单不存在或已作废');
+    if (!Array.isArray(payload.items) || !payload.items.length) throw new Error('至少选择一个商品修改实际返利');
+    const seen = new Set();
+    const updates = payload.items.map((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+        || typeof entry.id !== 'string' || !entry.id.trim()) throw new Error('返利商品编号无效');
+      if (seen.has(entry.id)) throw new Error('返利商品编号不能重复');
+      seen.add(entry.id);
+      const item = itemById(state, entry.id);
+      if (!item || item.reportId !== report.id) throw new Error('返利商品不存在、已作废或不属于此报单');
+      if (!Object.prototype.hasOwnProperty.call(entry, 'actualRebateCents')) throw new Error('实际返利金额不能为空');
+      const amount = entry.actualRebateCents;
+      if (amount !== null && (!Number.isSafeInteger(amount) || amount < 0)) {
+        throw new Error('实际返利必须是非负整数分且不能超过安全整数范围');
+      }
+      return { item, amount };
+    });
+    for (const { item, amount } of updates) {
+      if (amount === null) delete item.actualRebateCents;
+      else item.actualRebateCents = amount;
+      item.updatedAt = now;
+    }
+    report.updatedAt = now;
+    return { state, result: { id: report.id, itemIds: updates.map(({ item }) => item.id) } };
   }
 
   function normalizeShipment(raw, idFactory, now) {
@@ -816,10 +899,15 @@
     const now = options.now || isoNow();
     const idFactory = options.idFactory || makeId;
     if (!operation || !operation.type) throw new Error('同步操作缺少类型');
+    // Removing or reallocating an earlier open shipment can otherwise move a
+    // rounding cent into or out of a later, already closed shipment.
+    const closedAllocations = operation.type === 'shipment.update' || operation.type === 'shipment.void'
+      ? closedAllocationFinancialSnapshot(state) : null;
     let applied;
     switch (operation.type) {
       case 'report.create': applied = addReport(state, operation.payload || {}, now, idFactory); break;
       case 'report.update': applied = updateReport(state, operation.payload || {}, now, idFactory); break;
+      case 'report.rebate.update': applied = updateReportRebate(state, operation.payload || {}, now); break;
       case 'report.void': applied = voidReport(state, operation.payload || {}, now); break;
       case 'shipment.create': applied = addShipment(state, operation.payload || {}, now, idFactory); break;
       case 'shipment.update': applied = updateShipment(state, operation.payload || {}, now, idFactory); break;
@@ -834,6 +922,7 @@
       case 'refund.void': applied = voidRefund(state, operation.payload || {}, now); break;
       default: throw new Error(`不支持的操作类型: ${operation.type}`);
     }
+    if (closedAllocations) ensureClosedAllocationsUnchanged(closedAllocations, applied.state);
     if (!isStateSnapshot(applied.state)) throw new Error('操作产生了无效数据，已拒绝保存');
     return applied;
   }
@@ -901,6 +990,7 @@
     let expectedRefundCents = 0;
     let pendingExpectedRefundCents = 0;
     let expectedRebateCents = 0;
+    let actualRebateCents = 0;
     for (const item of state.reportItems.filter((row) => isActive(row) && activeReports.has(row.reportId))) {
       const refunded = refundQuantity(state, item.id);
       const retainedActual = Number(item.actualPaymentCents || 0)
@@ -923,6 +1013,8 @@
       expectedRefundCents += retainedExpectedRefund;
       pendingExpectedRefundCents += Math.max(retainedExpectedRefund - closedExpectedRefund, 0);
       expectedRebateCents += retainedExpectedRebate;
+      const itemActualRebate = actualRebateForItem(item);
+      actualRebateCents += itemActualRebate - amountForQuantity(itemActualRebate, item.quantity, refunded);
     }
     const expectedIncomeCents = expectedRefundCents + expectedRebateCents;
     let returnedCents = 0;
@@ -938,7 +1030,7 @@
     }
     const outstandingCents = Math.max(pendingExpectedRefundCents - pendingReturnedCents, 0);
     const recognizedRefundCents = closedActualRefundCents + pendingExpectedRefundCents;
-    const profitCents = recognizedRefundCents - totalPurchaseCents + expectedRebateCents;
+    const profitCents = recognizedRefundCents - totalPurchaseCents + actualRebateCents;
     const pureProfitCents = profitCents - totalShippingCents;
     return {
       totalPurchaseCents,
@@ -948,6 +1040,7 @@
       expectedRefundCents,
       pendingExpectedRefundCents,
       expectedRebateCents,
+      actualRebateCents,
       outstandingCents,
       returnedCents,
       pendingReturnedCents,
@@ -966,7 +1059,7 @@
       .map((allocation) => {
         const source = itemById(state, allocation.reportItemId);
         const values = allocationValues.get(allocation.id)
-          || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 };
+          || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0, actualRebateCents: 0 };
         return {
           ...allocation,
           productName: source?.productName || '已删除商品',
@@ -985,6 +1078,7 @@
       actualPaymentCents: items.reduce((sum, item) => sum + item.actualPaymentCents, 0),
       expectedRefundCents: items.reduce((sum, item) => sum + item.expectedRefundCents, 0),
       expectedRebateCents: items.reduce((sum, item) => sum + item.expectedRebateCents, 0),
+      actualRebateCents: items.reduce((sum, item) => sum + item.actualRebateCents, 0),
       returnedCents,
       settlementRecorded: settlements.length > 0,
       refundVarianceCents: returnedCents - items.reduce((sum, item) => sum + item.expectedRefundCents, 0),
@@ -1016,5 +1110,6 @@
     itemById,
     refundQuantity,
     shipmentItemQuantity,
+    actualRebateForItem,
   };
 });

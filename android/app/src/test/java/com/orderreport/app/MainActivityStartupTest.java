@@ -4,16 +4,21 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.view.View;
 import android.view.ViewGroup;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 
 import java.io.File;
+import java.io.InputStream;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -78,6 +83,90 @@ public class MainActivityStartupTest {
     }
 
     @Test
+    @SuppressWarnings("deprecation")
+    public void versionedOfflineAssetsKeepTheirOriginAndDefaultResourceLoader() throws Exception {
+        try (ActivityController<MainActivity> controller = Robolectric.buildActivity(MainActivity.class)) {
+            MainActivity activity = controller.setup().get();
+            WebView webView = requireWebView(activity);
+            Uri entry = Uri.parse(webView.getUrl());
+            assertEquals("file", entry.getScheme());
+            assertEquals("/android_asset/index.html", entry.getPath());
+            WebViewClient client = webView.getWebViewClient();
+            assertNotNull(client);
+
+            for (String name : new String[] {"client.js", "compat.js", "styles.css"}) {
+                Uri asset = Uri.parse("file:///android_asset/" + name + "?v=11");
+                assertEquals("/android_asset/" + name, asset.getPath());
+                assertEquals("v=11", asset.getQuery());
+                // The query is metadata, not part of an AssetManager filename.
+                try (InputStream stream = activity.getAssets().open(
+                        asset.getPath().substring("/android_asset/".length()))) {
+                    assertTrue("The bundled versioned resource must exist", stream.read() >= 0);
+                }
+                WebResourceRequest request = resourceRequest(asset);
+                assertNull("Subresources must use WebView's built-in file/asset loader",
+                        client.shouldInterceptRequest(webView, request));
+                assertNull(client.shouldInterceptRequest(webView, asset.toString()));
+                assertEquals("Cache-busting must not alter the existing navigation policy",
+                        client.shouldOverrideUrlLoading(webView, "file:///android_asset/" + name),
+                        client.shouldOverrideUrlLoading(webView, asset.toString()));
+                assertFalse("Versioned assets must remain inside the permitted local origin",
+                        client.shouldOverrideUrlLoading(webView, asset.toString()));
+                assertEquals(client.shouldOverrideUrlLoading(webView, asset.toString()),
+                        client.shouldOverrideUrlLoading(webView, request));
+            }
+            assertEquals("Resource requests must not navigate away from the existing local origin",
+                    entry.toString(), webView.getUrl());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("deprecation")
+    public void localNavigationAcceptsEmptyAuthoritiesButRejectsExternalAndEscapedPaths() {
+        try (ActivityController<MainActivity> controller = Robolectric.buildActivity(MainActivity.class)) {
+            WebView webView = requireWebView(controller.setup().get());
+            WebViewClient client = webView.getWebViewClient();
+            assertNotNull(client);
+            for (String allowed : new String[] {
+                    "file:///android_asset/index.html?nativeInsets=1#reports",
+                    "file:///android_asset/client.js?v=11",
+                    "file:/android_asset/index.html?nativeInsets=1#reports",
+                    "file:///android_asset/icons/app-icon.png"
+            }) {
+                assertFalse(allowed, client.shouldOverrideUrlLoading(webView, allowed));
+                assertFalse(allowed, client.shouldOverrideUrlLoading(webView,
+                        resourceRequest(Uri.parse(allowed))));
+            }
+            for (String blocked : new String[] {
+                    "https://example.test/android_asset/index.html",
+                    "http://example.test/android_asset/index.html",
+                    "content://example.test/android_asset/index.html",
+                    "javascript:alert(1)",
+                    "file://host/android_asset/index.html",
+                    "file://user@host/android_asset/index.html",
+                    "file://host:8080/android_asset/index.html",
+                    "file://%68ost/android_asset/index.html",
+                    "file:///data/local/tmp/index.html",
+                    "file:///android_asset_suffix/index.html",
+                    "file:///android_asset/../outside.html",
+                    "file:///android_asset/./client.js",
+                    "file:///android_asset/%2e%2e/outside.html",
+                    "file:///android_asset/%2E/client.js",
+                    "file:///android_asset/icons/%2e%2e/client.js",
+                    "file:///android_asset/%2f../outside.html",
+                    "file:///android_asset/%5c..%5coutside.html",
+                    "file:///android_asset/icons\\..\\client.js",
+                    "file:///android_asset/%252e%252e/outside.html",
+                    "file:///android_asset/client.js%00outside.html"
+            }) {
+                assertTrue(blocked, client.shouldOverrideUrlLoading(webView, blocked));
+                assertTrue(blocked, client.shouldOverrideUrlLoading(webView,
+                        resourceRequest(Uri.parse(blocked))));
+            }
+        }
+    }
+
+    @Test
     public void savedNavigationSurvivesActivityRecreation() {
         try (ActivityController<MainActivity> controller = Robolectric.buildActivity(MainActivity.class)) {
             MainActivity original = controller.setup().get();
@@ -134,6 +223,17 @@ public class MainActivityStartupTest {
         WebView webView = findWebView(activity.findViewById(android.R.id.content));
         assertNotNull("The app must launch its WebView, not silently fall back to an error screen", webView);
         return webView;
+    }
+
+    private static WebResourceRequest resourceRequest(Uri uri) {
+        return new WebResourceRequest() {
+            @Override public Uri getUrl() { return uri; }
+            @Override public boolean isForMainFrame() { return false; }
+            @Override public boolean isRedirect() { return false; }
+            @Override public boolean hasGesture() { return false; }
+            @Override public String getMethod() { return "GET"; }
+            @Override public Map<String, String> getRequestHeaders() { return new HashMap<>(); }
+        };
     }
 
     private static WebView findWebView(View view) {

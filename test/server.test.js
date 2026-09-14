@@ -66,6 +66,15 @@ test('HTTP API validates input, keeps idempotent operations, and removes its loc
   const appIcon = await request('GET', '/icons/app-icon-64.png');
   assert.equal(appIcon.status, 200);
   assert.equal(appIcon.headers['Content-Type'], 'image/png');
+  assert.equal(appIcon.headers['Cache-Control'], 'public, max-age=3600');
+
+  // Executable shell files must be revalidated after a deploy, including when
+  // they are addressed with a release query to bypass an older CDN entry.
+  for (const asset of ['/', '/index.html', '/client.js', '/styles.css', '/compat.js', '/sw.js', '/manifest.webmanifest', '/client.js?v=11', '/sw.js?v=11']) {
+    const served = await request('GET', asset);
+    assert.equal(served.status, 200, asset);
+    assert.equal(served.headers['Cache-Control'], 'no-cache', asset);
+  }
 
   const unauthorized = await request('GET', '/api/sync/pull');
   assert.equal(unauthorized.status, 401);

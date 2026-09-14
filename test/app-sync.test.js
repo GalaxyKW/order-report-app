@@ -341,6 +341,51 @@ test('a successful HTTP response without acknowledgements keeps the attempted qu
   assert.equal(harness.stored().queue[0].opId, operation.opId);
 });
 
+test('an old server rejecting actual rebate preserves the local zero and failed operation across reload', async () => {
+  const state = applyOperations([reportOperation('rebate_old_server')]);
+  const operation = {
+    opId: 'op_rebate_legacy', clientId: 'client_test', type: 'report.rebate.update',
+    payload: { id: 'report_rebate_old_server', items: [{ id: 'item_rebate_old_server', actualRebateCents: 0 }] },
+    createdAt: '2026-09-14T01:00:00.000Z',
+  };
+  const harness = createHarness(async () => jsonResponse(serverSnapshot({
+    state, accepted: [], rejected: [{ opId: operation.opId, error: '不支持的操作类型: report.rebate.update' }],
+  })));
+  harness.app.state = Domain.applyOperation(state, operation).state;
+  harness.app.queue = [operation];
+  await harness.pushPendingOperations();
+  assert.equal(harness.app.state.reportItems[0].actualRebateCents, 0);
+  assert.equal(harness.app.queue.length, 1);
+  assert.match(harness.app.queue[0].syncError, /不支持/);
+  assert.equal(harness.stored().queue[0].payload.items[0].actualRebateCents, 0);
+  const reloaded = createHarness(async () => { throw new Error('offline'); }, { storageMap: harness.storage });
+  assert.equal(reloaded.app.state.reportItems[0].actualRebateCents, 0);
+  assert.equal(reloaded.app.queue[0].opId, operation.opId);
+  if (reloaded.app.syncPromise) await reloaded.app.syncPromise;
+  assert.equal(reloaded.retryFailedOperation(operation.opId), true);
+  assert.notEqual(reloaded.app.queue[0].opId, operation.opId);
+  assert.equal(reloaded.app.queue[0].payload.items[0].actualRebateCents, 0);
+});
+
+test('successful rebate sync keeps an explicit zero through authoritative download', async () => {
+  const state = applyOperations([reportOperation('rebate_success')]);
+  const operation = {
+    opId: 'op_rebate_success', clientId: 'client_test', type: 'report.rebate.update',
+    payload: { id: 'report_rebate_success', items: [{ id: 'item_rebate_success', actualRebateCents: 0 }] },
+    createdAt: '2026-09-14T01:00:00.000Z',
+  };
+  const updated = Domain.applyOperation(state, operation).state;
+  const harness = createHarness(async () => jsonResponse(serverSnapshot({
+    state: updated, version: 2, accepted: [{ opId: operation.opId }], rejected: [],
+  })));
+  harness.app.state = updated;
+  harness.app.queue = [operation];
+  await harness.pushPendingOperations();
+  assert.equal(harness.app.queue.length, 0);
+  assert.equal(harness.stored().state.reportItems[0].actualRebateCents, 0);
+  assert.equal(Domain.stats(harness.app.state).actualRebateCents, 0);
+});
+
 test('101 pending operations are uploaded in batches of 100 and 1', async () => {
   const operations = Array.from({ length: 101 }, (_, index) => ({
     opId: `op_batch_${index}`,

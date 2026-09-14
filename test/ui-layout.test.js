@@ -105,9 +105,14 @@ function chrome(profile) {
     async close() {
       if (child.exitCode !== null || child.signalCode !== null) return;
       const exited = new Promise((resolve) => child.once('exit', resolve));
-      child.kill('SIGTERM');
-      const force = setTimeout(() => child.kill('SIGKILL'), 1500);
+      // Give Chrome's storage processes time to flush and exit, rather than
+      // terminating the browser while those children are still using its files.
+      const terminate = setTimeout(() => child.kill('SIGTERM'), 3000);
+      const force = setTimeout(() => child.kill('SIGKILL'), 6000);
+      try { await send('Browser.close'); }
+      catch { /* Closing the browser may close the CDP pipe before its reply. */ }
       await exited;
+      clearTimeout(terminate);
       clearTimeout(force);
     },
   };
@@ -159,6 +164,13 @@ function layoutReport() {
     if (rect.left < -1 || rect.right > innerWidth + 1) issues.push(`button outside viewport: ${label} (${rect.left.toFixed(1)}..${rect.right.toFixed(1)})`);
     if (button.scrollWidth > button.clientWidth + 1) issues.push(`button contents overflow: ${label} (${button.scrollWidth}/${button.clientWidth})`);
     if (button.matches('.button, .link-button') && textLines(button) > 1) issues.push(`short button label wraps: ${label}`);
+  }
+  for (const label of document.querySelectorAll('.rebate-default > span, .rebate-item-meta > span, .rebate-item-editor .field > label')) {
+    if (visible(label) && textLines(label) > 1) issues.push(`short rebate label wraps: ${label.textContent.trim()}`);
+  }
+  for (const input of document.querySelectorAll('.rebate-item-editor .input')) {
+    const rect = input.getBoundingClientRect();
+    if (visible(input) && (rect.left < -1 || rect.right > innerWidth + 1)) issues.push('rebate amount input outside viewport');
   }
   return { width: innerWidth, issues };
 }
@@ -221,6 +233,12 @@ test('real packaged pages keep responsive navigation, actions and dialogs usable
       await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
       await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
     };
+    const fill = async (selector, value) => {
+      await click(selector);
+      await evaluate(`document.querySelector(${JSON.stringify(selector)}).select()`);
+      // A browser input event, not a direct assignment to application state.
+      await send('Input.insertText', { text: value });
+    };
     const screenshot = async (name) => {
       if (!screenshotRoot) return;
       fs.mkdirSync(screenshotRoot, { recursive: true });
@@ -268,6 +286,78 @@ test('real packaged pages keep responsive navigation, actions and dialogs usable
             await screenshot(`${width}-${view}`);
           }
         }
+        const rebateRow = '.rebate-item-editor[data-item-id="preview-item"]';
+        const defaultCheckbox = `${rebateRow} [data-field="useExpected"]`;
+        const amountInput = `${rebateRow} [data-field="actualRebateCents"]`;
+        const rebateEditorState = () => evaluate(`(() => {
+          const row = document.querySelector(${JSON.stringify(rebateRow)});
+          const input = row.querySelector('[data-field="actualRebateCents"]');
+          return { useExpected: row.querySelector('[data-field="useExpected"]').checked,
+            disabled: input.disabled, value: input.value, preview: row.querySelector('[data-rebate-preview]').textContent };
+        })()`);
+        const checkProfit = async (expected) => {
+          await click('.nav-item[data-view="dashboard"] svg');
+          const value = await evaluate(`(() => {
+            const card = [...document.querySelectorAll('.stat-card')].find(node => node.querySelector('.stat-label').textContent === '利润');
+            return card && card.querySelector('.stat-value').textContent;
+          })()`);
+          assert.equal(value, `¥${expected}`, 'the rendered profit must reflect the saved actual rebate');
+          await checkLayout(`profit-${expected}`);
+        };
+        const openRebate = async () => {
+          await click('.nav-item[data-view="reports"] svg');
+          await click('[data-action="edit-rebate"][data-id="preview-report"]');
+          assert.ok(await evaluate('!!document.querySelector("form[data-form=rebate]")'), 'the report rebate entry must open its editor');
+        };
+        const saveRebate = async () => {
+          await click('form[data-form="rebate"] button[type="submit"]');
+          assert.equal(await evaluate('!!document.querySelector(".modal")'), false, 'saving the rebate must close the dialog');
+        };
+        const persistedRebate = () => evaluate(`(() => {
+          const stored = JSON.parse(localStorage.getItem('order-report-local-v1'));
+          const item = stored.state.reportItems.find(row => row.id === 'preview-item');
+          const lastOperation = stored.queue[stored.queue.length - 1];
+          return { hasOverride: Object.prototype.hasOwnProperty.call(item, 'actualRebateCents'),
+            value: item.actualRebateCents == null ? null : item.actualRebateCents,
+            operationType: lastOperation.type, operationValue: lastOperation.payload.items[0].actualRebateCents };
+        })()`);
+
+        await checkProfit('16.00');
+        await openRebate();
+        assert.deepEqual(await rebateEditorState(), {
+          useExpected: true, disabled: true, value: '6.00', preview: '计入利润：¥6.00（已扣除退款部分）',
+        });
+        await checkLayout('rebate-default');
+        await screenshot(`${width}-rebate-default`);
+        await click(defaultCheckbox);
+        assert.equal((await rebateEditorState()).disabled, false);
+        await fill(amountInput, '0');
+        assert.equal((await rebateEditorState()).preview, '计入利润：¥0.00（已扣除退款部分）');
+        await checkLayout('rebate-zero-draft');
+        await screenshot(`${width}-rebate-zero`);
+        await saveRebate();
+        assert.deepEqual(await persistedRebate(), {
+          hasOverride: true, value: 0, operationType: 'report.rebate.update', operationValue: 0,
+        });
+        await checkProfit('10.00');
+        await openRebate();
+        assert.deepEqual(await rebateEditorState(), {
+          useExpected: false, disabled: false, value: '0.00', preview: '计入利润：¥0.00（已扣除退款部分）',
+        }, 'reopening must preserve an explicitly saved zero, not substitute the forecast');
+        await checkLayout('rebate-zero-reopened');
+        await click(defaultCheckbox);
+        assert.deepEqual(await rebateEditorState(), {
+          useExpected: true, disabled: true, value: '6.00', preview: '计入利润：¥6.00（已扣除退款部分）',
+        });
+        await saveRebate();
+        assert.deepEqual(await persistedRebate(), {
+          hasOverride: false, value: null, operationType: 'report.rebate.update', operationValue: null,
+        });
+        await checkProfit('16.00');
+        await openRebate();
+        assert.equal((await rebateEditorState()).useExpected, true, 'restoring the default must survive reopening');
+        await click('.modal-heading [data-action="close-modal"]');
+        assert.equal(await evaluate('!!document.querySelector(".modal")'), false);
         assert.deepEqual(issues, [], issues.join('\n'));
       });
     }
@@ -284,6 +374,6 @@ test('real packaged pages keep responsive navigation, actions and dialogs usable
     }
     // Chrome's child processes can finish writing the isolated profile just
     // after the main process exits. Retry removal of this known temp tree.
-    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

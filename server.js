@@ -134,9 +134,10 @@ async function serveStatic(request, response, pathname) {
   try {
     const body = await fs.promises.readFile(filePath);
     const extension = path.extname(filePath).toLowerCase();
+    const revalidate = ['.html', '.js', '.css', '.webmanifest'].includes(extension);
     response.writeHead(200, {
       'Content-Type': MIME_TYPES[extension] || 'application/octet-stream',
-      'Cache-Control': extension === '.html' ? 'no-cache' : 'public, max-age=3600',
+      'Cache-Control': revalidate ? 'no-cache' : 'public, max-age=3600',
     });
     response.end(body);
   } catch {

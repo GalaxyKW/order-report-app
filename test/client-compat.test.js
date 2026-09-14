@@ -83,8 +83,11 @@ test('the generated browser client is current and uses ES2017-readable syntax', 
   acorn.parse(read('public/sw.js'), { ecmaVersion: 2017 });
   acorn.parse(boot, { ecmaVersion: 5 });
   const html = read('public/index.html');
-  assert.ok(html.indexOf('src="compat.js"') < html.indexOf('src="client.js"'));
-  assert.doesNotMatch(html, /src="(?:app\.js|shared\/domain\.js)"/);
+  const bootTag = html.match(/<script src="compat\.js\?v=[^\"]+"><\/script>/);
+  const clientTag = html.match(/<script src="client\.js\?v=[^\"]+"><\/script>/);
+  assert.ok(bootTag && clientTag, 'core scripts must have explicit CDN cache versions');
+  assert.ok(bootTag.index < clientTag.index);
+  assert.doesNotMatch(html, /src="(?:app\.js|shared\/domain\.js)(?:\?[^\"]*)?"/);
 });
 
 for (const legacy of [false, true]) {

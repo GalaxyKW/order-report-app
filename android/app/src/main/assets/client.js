@@ -48,7 +48,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const status = (input) => input === "active" || input === "void";
     const timestamps = (row, updated = true) => string(row.createdAt) && (!updated || string(row.updatedAt));
     if (!value.reports.every((row) => string(row.id) && string(row.occurredAt) && string(row.originalMessage, true) && timestamps(row) && status(row.status))) return false;
-    if (!value.reportItems.every((row) => string(row.id) && string(row.reportId) && string(row.productName) && optionalString(row.note) && integer(row.quantity, true) && integer(row.actualPaymentCents) && integer(row.expectedRefundCents) && integer(row.expectedRebateCents) && timestamps(row) && status(row.status))) return false;
+    if (!value.reportItems.every((row) => string(row.id) && string(row.reportId) && string(row.productName) && optionalString(row.note) && integer(row.quantity, true) && integer(row.actualPaymentCents) && integer(row.expectedRefundCents) && integer(row.expectedRebateCents) && (row.actualRebateCents == null || integer(row.actualRebateCents)) && timestamps(row) && status(row.status))) return false;
     if (!value.shipments.every((row) => string(row.id) && string(row.trackingNumber) && integer(row.shippingCostCents) && string(row.shippedAt) && optionalString(row.note) && optionalString(row.closedAt) && timestamps(row) && status(row.status))) return false;
     if (!value.shipmentItems.every((row) => string(row.id) && string(row.shipmentId) && string(row.reportItemId) && integer(row.quantity, true) && timestamps(row, false) && status(row.status))) return false;
     if (!value.settlements.every((row) => string(row.id) && string(row.shipmentId) && integer(row.amountCents) && string(row.settledAt) && optionalString(row.note) && timestamps(row) && status(row.status))) return false;
@@ -169,6 +169,12 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   }
   function formatMoney(cents) {
     const number = Number(cents || 0);
+    if (Number.isSafeInteger(number)) {
+      const digits = String(Math.abs(number));
+      const yuan = digits.length > 2 ? digits.slice(0, -2) : "0";
+      const fraction = digits.length > 1 ? digits.slice(-2) : "0".concat(digits);
+      return "".concat(number < 0 ? "-" : "").concat(yuan, ".").concat(fraction);
+    }
     return (number / 100).toFixed(2);
   }
   function amountForQuantity(totalCents, totalQuantity, quantity) {
@@ -251,6 +257,10 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function shipmentItemQuantity(state, reportItemId, excludeShipmentId) {
     return state.shipmentItems.filter((row) => row.reportItemId === reportItemId && isActive(row) && isActive(shipmentById(state, row.shipmentId)) && row.shipmentId !== excludeShipmentId).reduce((sum, row) => sum + Number(row.quantity || 0), 0);
   }
+  function actualRebateForItem(item) {
+    var _a, _b;
+    return (_b = (_a = item == null ? void 0 : item.actualRebateCents) != null ? _a : item == null ? void 0 : item.expectedRebateCents) != null ? _b : 0;
+  }
   function refundSortKey(refund) {
     return [refund.createdAt || "", refund.refundedAt || ""].join("\0");
   }
@@ -272,12 +282,13 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   }
   function allocationFinancialValues(source, quantityBefore, quantity) {
     if (!source) {
-      return { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 };
+      return { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0, actualRebateCents: 0 };
     }
     return {
       actualPaymentCents: amountForTailQuantity(source.actualPaymentCents, source.quantity, quantityBefore, quantity),
       expectedRefundCents: amountForTailQuantity(source.expectedRefundCents, source.quantity, quantityBefore, quantity),
-      expectedRebateCents: amountForTailQuantity(source.expectedRebateCents, source.quantity, quantityBefore, quantity)
+      expectedRebateCents: amountForTailQuantity(source.expectedRebateCents, source.quantity, quantityBefore, quantity),
+      actualRebateCents: amountForTailQuantity(actualRebateForItem(source), source.quantity, quantityBefore, quantity)
     };
   }
   function activeShipmentAllocations(state, excludeShipmentId = "") {
@@ -296,6 +307,35 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       shippedByItem.set(allocation.reportItemId, quantityBefore + Number(allocation.quantity || 0));
     }
     return valuesByAllocation;
+  }
+  function closedAllocationFinancialSnapshot(state) {
+    const closedShipmentIds = new Set(state.shipments.filter((shipment) => isActive(shipment) && shipment.closedAt).map((shipment) => shipment.id));
+    const snapshot = /* @__PURE__ */ new Map();
+    if (!closedShipmentIds.size) return snapshot;
+    const values = shipmentAllocationFinancialMap(state);
+    for (const allocation of state.shipmentItems) {
+      if (isActive(allocation) && closedShipmentIds.has(allocation.shipmentId)) {
+        snapshot.set(allocation.id, {
+          shipmentId: allocation.shipmentId,
+          values: values.get(allocation.id)
+        });
+      }
+    }
+    return snapshot;
+  }
+  function ensureClosedAllocationsUnchanged(before, state) {
+    if (!before.size) return;
+    const after = closedAllocationFinancialSnapshot(state);
+    const fields = ["actualPaymentCents", "expectedRefundCents", "expectedRebateCents", "actualRebateCents"];
+    for (const [id, previous] of before) {
+      const current = after.get(id);
+      if (!current || current.shipmentId !== previous.shipmentId || fields.some((field) => {
+        var _a, _b;
+        return ((_a = current.values) == null ? void 0 : _a[field]) !== ((_b = previous.values) == null ? void 0 : _b[field]);
+      })) {
+        throw new Error("该操作会改变已结单快递的金额分摊，请先撤销相关快递结单");
+      }
+    }
   }
   function previewShipmentAllocations(state, allocations, options = {}) {
     const excludeShipmentId = options.excludeShipmentId || "";
@@ -331,17 +371,18 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     for (const allocation of activeShipmentAllocations(state)) {
       if (allocation.shipmentId === excludeShipmentId) continue;
       const values = allocationValues.get(allocation.id);
-      const current = shippedValuesByItem.get(allocation.reportItemId) || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 };
+      const current = shippedValuesByItem.get(allocation.reportItemId) || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0, actualRebateCents: 0 };
       current.actualPaymentCents += Number((values == null ? void 0 : values.actualPaymentCents) || 0);
       current.expectedRefundCents += Number((values == null ? void 0 : values.expectedRefundCents) || 0);
       current.expectedRebateCents += Number((values == null ? void 0 : values.expectedRebateCents) || 0);
+      current.actualRebateCents += Number((values == null ? void 0 : values.actualRebateCents) || 0);
       shippedValuesByItem.set(allocation.reportItemId, current);
     }
     return state.reportItems.filter((item) => isActive(item) && isActive(reportById(state, item.reportId))).map((item) => {
       var _a, _b;
       const shipped = shipmentItemQuantity(state, item.id, excludeShipmentId);
       const refunded = refundQuantity(state, item.id);
-      const shippedValues = shippedValuesByItem.get(item.id) || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 };
+      const shippedValues = shippedValuesByItem.get(item.id) || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0, actualRebateCents: 0 };
       return {
         reportItemId: item.id,
         reportId: item.reportId,
@@ -355,9 +396,11 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
         actualPaymentCents: Number(item.actualPaymentCents || 0),
         expectedRefundCents: Number(item.expectedRefundCents || 0),
         expectedRebateCents: Number(item.expectedRebateCents || 0),
+        actualRebateCents: actualRebateForItem(item),
         availableActualPaymentCents: Math.max(Number(item.actualPaymentCents || 0) - amountForQuantity(item.actualPaymentCents, item.quantity, refunded) - shippedValues.actualPaymentCents, 0),
         availableExpectedRefundCents: Math.max(Number(item.expectedRefundCents || 0) - amountForQuantity(item.expectedRefundCents, item.quantity, refunded) - shippedValues.expectedRefundCents, 0),
-        availableExpectedRebateCents: Math.max(Number(item.expectedRebateCents || 0) - amountForQuantity(item.expectedRebateCents, item.quantity, refunded) - shippedValues.expectedRebateCents, 0)
+        availableExpectedRebateCents: Math.max(Number(item.expectedRebateCents || 0) - amountForQuantity(item.expectedRebateCents, item.quantity, refunded) - shippedValues.expectedRebateCents, 0),
+        availableActualRebateCents: Math.max(actualRebateForItem(item) - amountForQuantity(actualRebateForItem(item), item.quantity, refunded) - shippedValues.actualRebateCents, 0)
       };
     }).filter((row) => row.availableQuantity > 0).sort((a, b) => {
       const date = String(a.sourceDate).localeCompare(String(b.sourceDate));
@@ -404,6 +447,9 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function validateItemPayload(raw, idFactory) {
     var _a, _b, _c;
     const item = raw || {};
+    if (Object.prototype.hasOwnProperty.call(item, "actualRebateCents")) {
+      throw new Error("实际返利请通过“修改返利”单独保存");
+    }
     const productName = text(item.productName, "物品名称");
     const quantity = asPositiveInt(item.quantity, "".concat(productName, " 数量"));
     return {
@@ -502,6 +548,32 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     report.updatedAt = now;
     for (const item of state.reportItems.filter((row) => row.reportId === report.id)) item.status = "void";
     return { state, result: { id: report.id } };
+  }
+  function updateReportRebate(state, payload, now) {
+    const report = reportById(state, payload.id);
+    if (!report) throw new Error("报单不存在或已作废");
+    if (!Array.isArray(payload.items) || !payload.items.length) throw new Error("至少选择一个商品修改实际返利");
+    const seen = /* @__PURE__ */ new Set();
+    const updates = payload.items.map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.id !== "string" || !entry.id.trim()) throw new Error("返利商品编号无效");
+      if (seen.has(entry.id)) throw new Error("返利商品编号不能重复");
+      seen.add(entry.id);
+      const item = itemById(state, entry.id);
+      if (!item || item.reportId !== report.id) throw new Error("返利商品不存在、已作废或不属于此报单");
+      if (!Object.prototype.hasOwnProperty.call(entry, "actualRebateCents")) throw new Error("实际返利金额不能为空");
+      const amount = entry.actualRebateCents;
+      if (amount !== null && (!Number.isSafeInteger(amount) || amount < 0)) {
+        throw new Error("实际返利必须是非负整数分且不能超过安全整数范围");
+      }
+      return { item, amount };
+    });
+    for (const { item, amount } of updates) {
+      if (amount === null) delete item.actualRebateCents;
+      else item.actualRebateCents = amount;
+      item.updatedAt = now;
+    }
+    report.updatedAt = now;
+    return { state, result: { id: report.id, itemIds: updates.map(({ item }) => item.id) } };
   }
   function normalizeShipment(raw, idFactory, now) {
     var _a;
@@ -700,6 +772,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const now = options.now || isoNow();
     const idFactory = options.idFactory || makeId;
     if (!operation || !operation.type) throw new Error("同步操作缺少类型");
+    const closedAllocations = operation.type === "shipment.update" || operation.type === "shipment.void" ? closedAllocationFinancialSnapshot(state) : null;
     let applied;
     switch (operation.type) {
       case "report.create":
@@ -707,6 +780,9 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
         break;
       case "report.update":
         applied = updateReport(state, operation.payload || {}, now, idFactory);
+        break;
+      case "report.rebate.update":
+        applied = updateReportRebate(state, operation.payload || {}, now);
         break;
       case "report.void":
         applied = voidReport(state, operation.payload || {}, now);
@@ -747,6 +823,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       default:
         throw new Error("不支持的操作类型: ".concat(operation.type));
     }
+    if (closedAllocations) ensureClosedAllocationsUnchanged(closedAllocations, applied.state);
     if (!isStateSnapshot(applied.state)) throw new Error("操作产生了无效数据，已拒绝保存");
     return applied;
   }
@@ -804,6 +881,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     let expectedRefundCents = 0;
     let pendingExpectedRefundCents = 0;
     let expectedRebateCents = 0;
+    let actualRebateCents = 0;
     for (const item of state.reportItems.filter((row) => isActive(row) && activeReports.has(row.reportId))) {
       const refunded = refundQuantity(state, item.id);
       const retainedActual = Number(item.actualPaymentCents || 0) - amountForQuantity(item.actualPaymentCents, item.quantity, refunded);
@@ -823,6 +901,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       expectedRefundCents += retainedExpectedRefund;
       pendingExpectedRefundCents += Math.max(retainedExpectedRefund - closedExpectedRefund, 0);
       expectedRebateCents += retainedExpectedRebate;
+      const itemActualRebate = actualRebateForItem(item);
+      actualRebateCents += itemActualRebate - amountForQuantity(itemActualRebate, item.quantity, refunded);
     }
     const expectedIncomeCents = expectedRefundCents + expectedRebateCents;
     let returnedCents = 0;
@@ -838,7 +918,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }
     const outstandingCents = Math.max(pendingExpectedRefundCents - pendingReturnedCents, 0);
     const recognizedRefundCents = closedActualRefundCents + pendingExpectedRefundCents;
-    const profitCents = recognizedRefundCents - totalPurchaseCents + expectedRebateCents;
+    const profitCents = recognizedRefundCents - totalPurchaseCents + actualRebateCents;
     const pureProfitCents = profitCents - totalShippingCents;
     return {
       totalPurchaseCents,
@@ -848,6 +928,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       expectedRefundCents,
       pendingExpectedRefundCents,
       expectedRebateCents,
+      actualRebateCents,
       outstandingCents,
       returnedCents,
       pendingReturnedCents,
@@ -862,7 +943,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const allocationValues = shipmentAllocationFinancialMap(state);
     const items = state.shipmentItems.filter((item) => item.shipmentId === shipment.id && isActive(item)).map((allocation) => {
       const source = itemById(state, allocation.reportItemId);
-      const values = allocationValues.get(allocation.id) || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 };
+      const values = allocationValues.get(allocation.id) || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0, actualRebateCents: 0 };
       return __spreadValues(__spreadProps(__spreadValues({}, allocation), {
         productName: (source == null ? void 0 : source.productName) || "已删除商品",
         productNote: (source == null ? void 0 : source.note) || ""
@@ -879,6 +960,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       actualPaymentCents: items.reduce((sum, item) => sum + item.actualPaymentCents, 0),
       expectedRefundCents: items.reduce((sum, item) => sum + item.expectedRefundCents, 0),
       expectedRebateCents: items.reduce((sum, item) => sum + item.expectedRebateCents, 0),
+      actualRebateCents: items.reduce((sum, item) => sum + item.actualRebateCents, 0),
       returnedCents,
       settlementRecorded: settlements.length > 0,
       refundVarianceCents: returnedCents - items.reduce((sum, item) => sum + item.expectedRefundCents, 0)
@@ -908,7 +990,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     reportById,
     itemById,
     refundQuantity,
-    shipmentItemQuantity
+    shipmentItemQuantity,
+    actualRebateForItem
   };
 });
 ;
@@ -1351,8 +1434,9 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       quantity: sum.quantity + item.quantity,
       actualPaymentCents: sum.actualPaymentCents + Number(item.actualPaymentCents || 0),
       expectedRefundCents: sum.expectedRefundCents + Number(item.expectedRefundCents || 0),
-      expectedRebateCents: sum.expectedRebateCents + Number(item.expectedRebateCents || 0)
-    }), { quantity: 0, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 });
+      expectedRebateCents: sum.expectedRebateCents + Number(item.expectedRebateCents || 0),
+      actualRebateCents: sum.actualRebateCents + Domain.actualRebateForItem(item)
+    }), { quantity: 0, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0, actualRebateCents: 0 });
   }
   function reportSearchText(report) {
     return [report.occurredAt, report.originalMessage, ...reportItems(report.id).map((item) => [item.productName, item.note].join(" "))].join(" ").toLowerCase();
@@ -1809,6 +1893,9 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function statCard(label, value, foot, iconName, tone = "green", featured = false, valueClass = "money") {
     return '<article class="stat-card accent-'.concat(esc(tone)).concat(featured ? " stat-card-featured" : "", '"><div class="stat-header"><div class="stat-label">').concat(esc(label), '</div><span class="stat-icon">').concat(icon(iconName), '</span></div><div class="stat-value ').concat(esc(valueClass), '">').concat(esc(value), '</div><div class="stat-foot">').concat(foot, "</div></article>");
   }
+  function rebateComparison(expected, actual) {
+    return '<div class="rebate-comparison"><span class="muted small">预计 <span class="money">'.concat(money(expected), '</span></span><span>实际 <span class="money">').concat(money(actual), "</span></span></div>");
+  }
   function dashboardQuickActions() {
     return '<section class="quick-actions-section" aria-labelledby="quick-actions-title"><div class="quick-actions-heading"><h2 id="quick-actions-title">常用操作</h2><span class="muted small">离线也能记录</span></div><div class="quick-actions">\n      <button class="quick-action" type="button" data-action="new-report"><span class="quick-action-icon">'.concat(icon("reports"), '</span><span class="quick-action-copy"><strong>新增报单</strong><span>记录商品与付款</span></span><span class="quick-action-arrow">').concat(icon("arrow"), '</span></button>\n      <button class="quick-action" type="button" data-action="new-shipment"><span class="quick-action-icon">').concat(icon("shipments"), '</span><span class="quick-action-copy"><strong>新增快递</strong><span>从库存选择商品</span></span><span class="quick-action-arrow">').concat(icon("arrow"), '</span></button>\n      <button class="quick-action" type="button" data-view="inventory"><span class="quick-action-icon">').concat(icon("inventory"), '</span><span class="quick-action-copy"><strong>查看仓库</strong><span>查看剩余商品</span></span><span class="quick-action-arrow">').concat(icon("arrow"), '</span></button>\n      <button class="quick-action" type="button" data-action="new-refund"><span class="quick-action-icon">').concat(icon("refunds"), '</span><span class="quick-action-copy"><strong>登记退款</strong><span>记录退货流水</span></span><span class="quick-action-arrow">').concat(icon("arrow"), "</span></button>\n    </div></section>");
   }
@@ -1816,10 +1903,10 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const summary = Domain.stats(app.state);
     const reports = activeReports().sort((a, b) => String(b.occurredAt).localeCompare(String(a.occurredAt))).slice(0, 5);
     const shipments = shipmentViews().sort((a, b) => String(b.shipment.shippedAt).localeCompare(String(a.shipment.shippedAt))).slice(0, 5);
-    return "".concat(pageHeading("Workspace", "总览", "收入、库存和返款，一目了然"), "\n      ").concat(dashboardQuickActions(), '\n      <section class="card-grid" aria-label="经营概览">\n        ').concat(statCard("预计未返款", money(summary.outstandingCents), '<span class="metric-pair">原始预计返款 '.concat(money(summary.expectedRefundCents), '</span><span class="metric-pair">预计返利 ').concat(money(summary.expectedRebateCents), '</span><span class="stat-subfoot"><span class="metric-pair">有 ').concat(money(summary.pendingShipmentPurchaseCents), ' 商品待发货</span></span><span class="stat-subfoot"><span class="metric-pair">未结单预计 ').concat(money(summary.pendingExpectedRefundCents), '</span><span class="metric-pair">已结单实际 ').concat(money(summary.closedActualRefundCents), "</span></span>"), "clock", "green", true), "\n        ").concat(statCard("累计商品付款", money(summary.totalPurchaseCents), "已扣除退款商品", "wallet"), "\n        ").concat(statCard("累计快递费用", money(summary.totalShippingCents), "全部有效快递", "shipments", "orange"), "\n        ").concat(statCard("已返款", money(summary.returnedCents), '<span class="metric-pair">已结单实际 '.concat(money(summary.closedActualRefundCents), '</span><span class="metric-pair">未结单已收 ').concat(money(summary.pendingReturnedCents), "</span>"), "check"), "\n        ").concat(statCard("利润", money(summary.profitCents), '<span class="phrase">已结单实际</span> <span class="phrase">+ 未结单预计</span> <span class="phrase">- 商品付款</span> <span class="phrase">+ 预计返利</span>', "trend"), "\n        ").concat(statCard("纯利润", money(summary.pureProfitCents), "利润减快递费用", "trend", "orange"), "\n        ").concat(statCard("利率", percent(summary.rate), "纯利润 / 累计商品付款", "percent", "green", false, "number"), '\n      </section>\n      <section class="two-column">\n        <article class="panel"><div class="panel-heading"><h2>最近报单</h2><button class="link-button button-with-icon" type="button" data-view="reports">').concat(buttonContent("查看全部", "arrow"), '</button></div><div class="record-list">').concat(reports.length ? reports.map((report) => {
+    return "".concat(pageHeading("Workspace", "总览", "收入、库存和返款，一目了然"), "\n      ").concat(dashboardQuickActions(), '\n      <section class="card-grid" aria-label="经营概览">\n        ').concat(statCard("预计未返款", money(summary.outstandingCents), '<span class="metric-pair">原始预计返款 '.concat(money(summary.expectedRefundCents), '</span><span class="metric-pair">预计返利 ').concat(money(summary.expectedRebateCents), '</span><span class="metric-pair">实际返利 ').concat(money(summary.actualRebateCents), '</span><span class="stat-subfoot"><span class="metric-pair">有 ').concat(money(summary.pendingShipmentPurchaseCents), ' 商品待发货</span></span><span class="stat-subfoot"><span class="metric-pair">未结单预计 ').concat(money(summary.pendingExpectedRefundCents), '</span><span class="metric-pair">已结单实际 ').concat(money(summary.closedActualRefundCents), "</span></span>"), "clock", "green", true), "\n        ").concat(statCard("累计商品付款", money(summary.totalPurchaseCents), "已扣除退款商品", "wallet"), "\n        ").concat(statCard("累计快递费用", money(summary.totalShippingCents), "全部有效快递", "shipments", "orange"), "\n        ").concat(statCard("已返款", money(summary.returnedCents), '<span class="metric-pair">已结单实际 '.concat(money(summary.closedActualRefundCents), '</span><span class="metric-pair">未结单已收 ').concat(money(summary.pendingReturnedCents), "</span>"), "check"), "\n        ").concat(statCard("利润", money(summary.profitCents), '<span class="phrase">已结单实际</span> <span class="phrase">+ 未结单预计</span> <span class="phrase">- 商品付款</span> <span class="phrase">+ 实际返利</span>', "trend"), "\n        ").concat(statCard("纯利润", money(summary.pureProfitCents), "利润减快递费用", "trend", "orange"), "\n        ").concat(statCard("利率", percent(summary.rate), "纯利润 / 累计商品付款", "percent", "green", false, "number"), '\n      </section>\n      <section class="two-column">\n        <article class="panel"><div class="panel-heading"><h2>最近报单</h2><button class="link-button button-with-icon" type="button" data-view="reports">').concat(buttonContent("查看全部", "arrow"), '</button></div><div class="record-list">').concat(reports.length ? reports.map((report) => {
       const total = reportTotals(report.id);
-      return '<div class="record-row"><div class="record-main"><div class="record-title">'.concat(esc(reportItems(report.id).map((item) => item.productName).join("、")), '</div><div class="record-meta">').concat(esc(dateText(report.occurredAt)), " · ").concat(total.quantity, ' 件</div></div><div class="record-side"><div class="money">').concat(money(total.actualPaymentCents), '</div><div class="muted record-metrics"><span class="metric-pair">返款 ').concat(money(total.expectedRefundCents), '</span><span class="metric-pair">返利 ').concat(money(total.expectedRebateCents), "</span></div></div></div>");
-    }).join("") : emptyState("从第一笔报单开始", "录入商品和付款，库存与收益会自动整理。", primaryAction("new-report", "新增报单"), "reports"), '</div></article>\n        <article class="panel"><div class="panel-heading"><h2>最近快递</h2><button class="link-button button-with-icon" type="button" data-view="shipments">').concat(buttonContent("查看全部", "arrow"), '</button></div><div class="record-list">').concat(shipments.length ? shipments.map((view) => '<div class="record-row"><div class="record-main"><div class="record-title">'.concat(esc(view.shipment.trackingNumber), '</div><div class="record-meta">').concat(esc(view.items.map((item) => item.productName).join("、")), " · ").concat(view.items.reduce((sum, item) => sum + item.quantity, 0), ' 件</div></div><div class="record-side"><div class="money">').concat(money(view.returnedCents), '</div><div class="muted record-metrics"><span class="metric-pair">商品付款 ').concat(money(view.actualPaymentCents), '</span><span class="metric-pair">预计返款 ').concat(money(view.expectedRefundCents), '</span><span class="metric-pair">返利 ').concat(money(view.expectedRebateCents), "</span></div></div></div>")).join("") : emptyState("还没有快递记录", "库存有商品后，就可以记录发货与返款。", primaryAction("new-shipment", "新增快递"), "shipments"), "</div></article>\n      </section>");
+      return '<div class="record-row"><div class="record-main"><div class="record-title">'.concat(esc(reportItems(report.id).map((item) => item.productName).join("、")), '</div><div class="record-meta">').concat(esc(dateText(report.occurredAt)), " · ").concat(total.quantity, ' 件</div></div><div class="record-side"><div class="money">').concat(money(total.actualPaymentCents), '</div><div class="muted record-metrics"><span class="metric-pair">返款 ').concat(money(total.expectedRefundCents), '</span><span class="metric-pair">预计返利 ').concat(money(total.expectedRebateCents), '</span><span class="metric-pair">整批实际返利 ').concat(money(total.actualRebateCents), "</span></div></div></div>");
+    }).join("") : emptyState("从第一笔报单开始", "录入商品和付款，库存与收益会自动整理。", primaryAction("new-report", "新增报单"), "reports"), '</div></article>\n        <article class="panel"><div class="panel-heading"><h2>最近快递</h2><button class="link-button button-with-icon" type="button" data-view="shipments">').concat(buttonContent("查看全部", "arrow"), '</button></div><div class="record-list">').concat(shipments.length ? shipments.map((view) => '<div class="record-row"><div class="record-main"><div class="record-title">'.concat(esc(view.shipment.trackingNumber), '</div><div class="record-meta">').concat(esc(view.items.map((item) => item.productName).join("、")), " · ").concat(view.items.reduce((sum, item) => sum + item.quantity, 0), ' 件</div></div><div class="record-side"><div class="money">').concat(money(view.returnedCents), '</div><div class="muted record-metrics"><span class="metric-pair">商品付款 ').concat(money(view.actualPaymentCents), '</span><span class="metric-pair">预计返款 ').concat(money(view.expectedRefundCents), '</span><span class="metric-pair">预计返利 ').concat(money(view.expectedRebateCents), '</span><span class="metric-pair">实际返利 ').concat(money(view.actualRebateCents), "</span></div></div></div>")).join("") : emptyState("还没有快递记录", "库存有商品后，就可以记录发货与返款。", primaryAction("new-shipment", "新增快递"), "shipments"), "</div></article>\n      </section>");
   }
   function reportRows() {
     const query = app.search.trim().toLowerCase();
@@ -1828,11 +1915,11 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     return rows.map((report) => {
       const items = reportItems(report.id);
       const total = reportTotals(report.id);
-      return '<tr><td class="number">'.concat(esc(dateText(report.occurredAt)), "</td><td><strong>").concat(esc(items.map(productLabel).join("、")), '</strong><div class="muted small">').concat(items.length, " 个商品行 · ").concat(total.quantity, ' 件</div></td><td class="money">').concat(money(total.actualPaymentCents), '</td><td class="money">').concat(money(total.expectedRefundCents), '</td><td class="money">').concat(money(total.expectedRebateCents), "</td><td>").concat(esc(report.originalMessage || "-"), '</td><td><div class="inline-actions"><button class="link-button" data-action="edit-report" data-id="').concat(esc(report.id), '">编辑</button><button class="link-button danger" data-action="void-report" data-id="').concat(esc(report.id), '">作废</button></div></td></tr>');
+      return '<tr><td class="number">'.concat(esc(dateText(report.occurredAt)), "</td><td><strong>").concat(esc(items.map(productLabel).join("、")), '</strong><div class="muted small">').concat(items.length, " 个商品行 · ").concat(total.quantity, ' 件</div></td><td class="money">').concat(money(total.actualPaymentCents), '</td><td class="money">').concat(money(total.expectedRefundCents), '</td><td title="原始整批返利；利润会自动扣除退款部分">').concat(rebateComparison(total.expectedRebateCents, total.actualRebateCents), "</td><td>").concat(esc(report.originalMessage || "-"), '</td><td><div class="inline-actions"><button class="link-button" data-action="edit-report" data-id="').concat(esc(report.id), '">编辑</button><button class="link-button" data-action="edit-rebate" data-id="').concat(esc(report.id), '">调整返利</button><button class="link-button danger" data-action="void-report" data-id="').concat(esc(report.id), '">作废</button></div></td></tr>');
     }).join("");
   }
   function renderReports() {
-    return "".concat(pageHeading("Records", "报单", "商品付款、预计返款和预计返利", primaryAction("new-report", "新增报单")), '\n      <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="reports" value="').concat(esc(app.search), '" placeholder="搜索商品、原消息、时间"></div><div class="toolbar-group"><span class="muted small">').concat(activeReports().length, ' 笔有效报单</span></div></div>\n      <section class="panel table-panel"><div class="table-wrap"><table class="mobile-table report-table"><thead><tr><th>时间</th><th>商品</th><th>实际付款</th><th>预计返款</th><th>预计返利</th><th>原消息</th><th>操作</th></tr></thead><tbody>').concat(reportRows(), "</tbody></table></div></section>");
+    return "".concat(pageHeading("Records", "报单", "商品付款、预计返款与整批返利；利润自动扣除退款部分", primaryAction("new-report", "新增报单")), '\n      <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="reports" value="').concat(esc(app.search), '" placeholder="搜索商品、原消息、时间"></div><div class="toolbar-group"><span class="muted small">').concat(activeReports().length, ' 笔有效报单</span></div></div>\n      <section class="panel table-panel"><div class="table-wrap"><table class="mobile-table report-table"><thead><tr><th>时间</th><th>商品</th><th>实际付款</th><th>预计返款</th><th>返利（整批）</th><th>原消息</th><th>操作</th></tr></thead><tbody>').concat(reportRows(), "</tbody></table></div></section>");
   }
   function shipmentRows() {
     const query = app.search.trim().toLowerCase();
@@ -1846,18 +1933,18 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       const settlementAction = view.closed ? '<button class="link-button" data-action="reopen-shipment" data-id="'.concat(esc(shipment.id), '">撤销结单</button>') : '<button class="link-button" data-action="close-shipment" data-id="'.concat(esc(shipment.id), '">结单</button>');
       const addSettlementAction = view.closed ? "" : '<button class="link-button" data-action="add-settlement" data-id="'.concat(esc(shipment.id), '">记返款</button>');
       const shipmentEditActions = view.closed ? "" : '<button class="link-button" data-action="edit-shipment" data-id="'.concat(esc(shipment.id), '">编辑</button><button class="link-button danger" data-action="void-shipment" data-id="').concat(esc(shipment.id), '">作废</button>');
-      return '<tr><td class="number">'.concat(esc(dateText(shipment.shippedAt)), "</td><td><strong>").concat(esc(shipment.trackingNumber), '</strong><div class="muted small">').concat(quantity, " 件</div></td><td>").concat(esc(view.items.map(shipmentItemLabel).join("、")), '</td><td class="money">').concat(money(view.actualPaymentCents), '</td><td class="money">').concat(money(shipment.shippingCostCents), '</td><td class="money">').concat(money(view.expectedRefundCents), '</td><td class="money">').concat(money(view.expectedRebateCents), '</td><td class="money">').concat(money(view.returnedCents)).concat(view.closed ? '<div class="muted small">最终金额</div>' : "", "</td><td>").concat(settlementDetails, '</td><td><div class="inline-actions"><button class="link-button" data-action="print-shipment" data-id="').concat(esc(shipment.id), '">打印单子</button>').concat(addSettlementAction).concat(settlementAction).concat(shipmentEditActions, "</div></td></tr>");
+      return '<tr><td class="number">'.concat(esc(dateText(shipment.shippedAt)), "</td><td><strong>").concat(esc(shipment.trackingNumber), '</strong><div class="muted small">').concat(quantity, " 件</div></td><td>").concat(esc(view.items.map(shipmentItemLabel).join("、")), '</td><td class="money">').concat(money(view.actualPaymentCents), '</td><td class="money">').concat(money(shipment.shippingCostCents), '</td><td class="money">').concat(money(view.expectedRefundCents), "</td><td>").concat(rebateComparison(view.expectedRebateCents, view.actualRebateCents), '</td><td class="money">').concat(money(view.returnedCents)).concat(view.closed ? '<div class="muted small">最终金额</div>' : "", "</td><td>").concat(settlementDetails, '</td><td><div class="inline-actions"><button class="link-button" data-action="print-shipment" data-id="').concat(esc(shipment.id), '">打印单子</button>').concat(addSettlementAction).concat(settlementAction).concat(shipmentEditActions, "</div></td></tr>");
     }).join("");
   }
   function renderShipments() {
-    return "".concat(pageHeading("Fulfillment", "快递", "从剩余仓库按先进先出分配商品", primaryAction("new-shipment", "新增快递")), '\n      <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="shipments" value="').concat(esc(app.search), '" placeholder="搜索单号、商品、备注"></div><div class="toolbar-group"><span class="muted small">').concat(shipmentViews().length, ' 笔有效快递</span></div></div>\n      <section class="panel table-panel"><div class="table-wrap"><table class="mobile-table shipment-table"><thead><tr><th>发出时间</th><th>单号</th><th>快递内容</th><th>所含商品实际付款</th><th>快递价格</th><th>预计返款</th><th>预计返利</th><th>实际返款</th><th>状态</th><th>操作</th></tr></thead><tbody>').concat(shipmentRows(), "</tbody></table></div></section>");
+    return "".concat(pageHeading("Fulfillment", "快递", "从剩余仓库按先进先出分配商品", primaryAction("new-shipment", "新增快递")), '\n      <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="shipments" value="').concat(esc(app.search), '" placeholder="搜索单号、商品、备注"></div><div class="toolbar-group"><span class="muted small">').concat(shipmentViews().length, ' 笔有效快递</span></div></div>\n      <section class="panel table-panel"><div class="table-wrap"><table class="mobile-table shipment-table"><thead><tr><th>发出时间</th><th>单号</th><th>快递内容</th><th>所含商品实际付款</th><th>快递价格</th><th>预计返款</th><th>返利</th><th>实际返款</th><th>状态</th><th>操作</th></tr></thead><tbody>').concat(shipmentRows(), "</tbody></table></div></section>");
   }
   function renderInventory() {
     const lots = Domain.inventoryLots(app.state);
     const aggregate = Domain.aggregateInventory(app.state);
     const availableQuantity = lots.reduce((sum, lot) => sum + lot.availableQuantity, 0);
     const availableValue = lots.reduce((sum, lot) => sum + lot.availableActualPaymentCents, 0);
-    return "".concat(pageHeading("Inventory", "仓库", "当前未发快递、未退款的商品批次", primaryAction("new-refund", "登记退款", "refunds")), '\n      <section class="stock-summary"><div class="panel"><div class="muted small">可用商品种类</div><div class="summary-value">').concat(aggregate.length, '</div></div><div class="panel"><div class="muted small">可用商品数量</div><div class="summary-value number">').concat(availableQuantity, '</div></div><div class="panel"><div class="muted small">可用商品成本</div><div class="summary-value money">').concat(money(availableValue), '</div></div></section>\n      <section class="panel table-panel"><div class="panel-heading"><h2>库存批次</h2><span class="muted small">按报单时间排序</span></div><div class="table-wrap"><table class="mobile-table inventory-table"><thead><tr><th>商品</th><th>报单时间</th><th>批次数量</th><th>剩余</th><th>剩余成本</th><th>剩余预计收益</th><th>操作</th></tr></thead><tbody>').concat(lots.length ? lots.map((lot) => "<tr><td><strong>".concat(esc(lot.productName), "</strong></td><td>").concat(esc(dateText(lot.sourceDate)), '</td><td class="number">').concat(lot.quantity, '</td><td class="number"><span class="tag tag-green">').concat(lot.availableQuantity, '</span></td><td class="money">').concat(money(lot.availableActualPaymentCents), '</td><td class="money">').concat(money(lot.availableExpectedRefundCents + lot.availableExpectedRebateCents), '</td><td><button class="link-button" data-action="new-refund" data-id="').concat(esc(lot.reportItemId), '">退款</button></td></tr>')).join("") : '<tr><td colspan="7">'.concat(emptyState("仓库为空", "新增报单后，可发货或退款的商品会出现在这里。", primaryAction("new-report", "新增报单"), "inventory"), "</td></tr>"), "</tbody></table></div></section>");
+    return "".concat(pageHeading("Inventory", "仓库", "当前未发快递、未退款的商品批次", primaryAction("new-refund", "登记退款", "refunds")), '\n      <section class="stock-summary"><div class="panel"><div class="muted small">可用商品种类</div><div class="summary-value">').concat(aggregate.length, '</div></div><div class="panel"><div class="muted small">可用商品数量</div><div class="summary-value number">').concat(availableQuantity, '</div></div><div class="panel"><div class="muted small">可用商品成本</div><div class="summary-value money">').concat(money(availableValue), '</div></div></section>\n      <section class="panel table-panel"><div class="panel-heading"><h2>库存批次</h2><span class="muted small">按报单时间排序</span></div><div class="table-wrap"><table class="mobile-table inventory-table"><thead><tr><th>商品</th><th>报单时间</th><th>批次数量</th><th>剩余</th><th>剩余成本</th><th>剩余预计收益</th><th>操作</th></tr></thead><tbody>').concat(lots.length ? lots.map((lot) => "<tr><td><strong>".concat(esc(lot.productName), "</strong></td><td>").concat(esc(dateText(lot.sourceDate)), '</td><td class="number">').concat(lot.quantity, '</td><td class="number"><span class="tag tag-green">').concat(lot.availableQuantity, '</span></td><td class="money">').concat(money(lot.availableActualPaymentCents), '</td><td><span class="money">').concat(money(lot.availableExpectedRefundCents + lot.availableExpectedRebateCents), '</span><div class="muted small">剩余实际返利 <span class="money">').concat(money(lot.availableActualRebateCents), '</span></div></td><td><button class="link-button" data-action="new-refund" data-id="').concat(esc(lot.reportItemId), '">退款</button></td></tr>')).join("") : '<tr><td colspan="7">'.concat(emptyState("仓库为空", "新增报单后，可发货或退款的商品会出现在这里。", primaryAction("new-report", "新增报单"), "inventory"), "</td></tr>"), "</tbody></table></div></section>");
   }
   function refundRows() {
     const rows = app.state.refunds.filter(Domain.isActive).sort((a, b) => String(b.refundedAt).localeCompare(String(a.refundedAt)));
@@ -1875,6 +1962,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     return {
       "report.create": "新增报单",
       "report.update": "编辑报单",
+      "report.rebate.update": "调整实际返利",
       "report.void": "作废报单",
       "shipment.create": "新增快递",
       "shipment.update": "编辑快递",
@@ -1989,9 +2077,10 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const { pending, failed } = queueCounts();
     const connection = connectionStatus();
     const failedOperations = app.queue.filter((operation) => operation.syncError);
+    const rebateUpgradeWarning = failedOperations.some((operation) => operation.type === "report.rebate.update" && /不支持的操作类型|unsupported operation/i.test(operation.syncError)) ? '<div class="warning-box rebate-upgrade-warning">服务器版本尚不支持实际返利。本机修改和操作队列已保留，后续操作会暂停上传；请先升级服务器，再点击该条“换新编号重试”。不要通过下载覆盖来处理，否则会丢掉未上传的调整。</div>' : "";
     const recoveryCount = currentRecoveryRaws().length;
     const legacyBindingAction = app.hasSynced && !app.lastServerId && pending ? '<div class="warning-box">这是旧版本留下的已同步数据和待上传队列，缺少服务器身份记录。普通同步已暂停；请核对地址后人工确认绑定，队列才会上传。</div><div class="backup-actions"><button class="button" type="button" data-action="sync-bind-upload">绑定当前服务器并上传</button></div>' : "";
-    return "".concat(pageHeading("Configuration", "设置", "服务器同步和本机数据", ""), '\n      <section class="settings-stack">\n        <article class="panel"><div class="panel-heading"><h2>同步连接</h2><span class="status-pill ').concat(connection.kind, '">').concat(connection.label, '</span></div><div class="panel-body padded"><form data-form="settings"><div class="form-grid"><div class="field full"><label for="api-base">服务器地址</label><input class="input" id="api-base" name="apiBase" value="').concat(esc(app.settings.apiBase), '" placeholder="https://order.example.com"><div class="field-help">填写 HTTPS 反向代理地址，例如 https://order.example.com。</div></div><div class="field full"><label for="sync-token">同步令牌</label><input class="input" id="sync-token" name="token" type="password" value="').concat(esc(app.settings.token), '" autocomplete="off" placeholder="从服务器 runtime/sync-token 读取"><div class="field-help">令牌只保存于本机 WebView，不会写入业务 Git 仓库。</div></div></div><div class="sync-actions"><button class="button" type="submit">保存连接</button><button class="button button-quiet" type="button" data-action="sync-test">测试当前输入</button><button class="button button-quiet" type="button" data-action="sync-upload">上传待处理</button><button class="button button-quiet" type="button" data-action="sync-download">下载并覆盖</button></div><p class="field-help sync-action-help"><span class="phrase">测试只使用当前输入且不会保存；</span><span class="phrase">上传和下载只使用已保存的连接。</span><span class="phrase">下载会以服务器数据覆盖本机。</span></p></form></div></article>\n        <article class="panel"><div class="panel-heading"><h2>同步状态</h2><span class="muted small">').concat(queueSummary(), '</span></div><div class="panel-body padded"><div class="sync-counts"><div><span>待上传操作</span><strong>').concat(pending, "</strong></div><div><span>失败待处理</span><strong>").concat(failed, "</strong></div></div>").concat(legacyBindingAction).concat(app.syncError ? '<div class="danger-box">'.concat(esc(app.syncError), "</div>") : '<div class="info-box">待上传数量只代表尚未送到服务器的本地操作，不代表本机业务数据条数。成功同步后为 0 是正常状态。</div>').concat(recoveryCount ? '<div class="warning-box">已完整保留 '.concat(recoveryCount, ' 份原始本地恢复副本。请先全部导出，再决定是否下载覆盖。</div><div class="backup-actions"><button class="button button-quiet" data-action="export-recovery">导出 ').concat(recoveryCount, " 份原始恢复数据</button></div>") : "").concat(failedOperations.length ? '<div class="failed-operation-list">'.concat(failedOperations.map((operation) => '<div class="failed-operation"><div><strong>'.concat(esc(operationLabel(operation.type)), "</strong><span>").concat(esc(dateText(operation.createdAt)), "</span></div><p>").concat(esc(operation.syncError), '</p><div class="inline-actions"><button class="link-button" data-action="retry-failed" data-id="').concat(esc(operation.opId), '">换新编号重试</button><button class="link-button danger" data-action="discard-failed" data-id="').concat(esc(operation.opId), '">安全丢弃此条</button></div></div>')).join(""), '</div><div class="warning-box">失败操作不会自动重复提交。重试会生成新的操作编号；安全丢弃会先从已绑定服务器拉取权威状态，再重放其余队列。离线、服务器不符或任一重放失败时不会更改本机数据。</div>') : "", '</div></article>\n        <article class="panel"><div class="panel-heading"><h2>数据备份</h2></div><div class="panel-body padded"><div class="backup-actions"><button class="button button-quiet" data-action="export-local">导出本机数据</button><button class="button button-quiet" data-action="export-server">导出服务器数据</button></div><p class="field-help" style="margin-top:12px">导出内容可能包含完整业务数据。手机端会打开系统保存位置，也可以复制 JSON 内容。</p></div></article>\n      </section>');
+    return "".concat(pageHeading("Configuration", "设置", "服务器同步和本机数据", "")).concat(rebateUpgradeWarning, '\n      <section class="settings-stack">\n        <article class="panel"><div class="panel-heading"><h2>同步连接</h2><span class="status-pill ').concat(connection.kind, '">').concat(connection.label, '</span></div><div class="panel-body padded"><form data-form="settings"><div class="form-grid"><div class="field full"><label for="api-base">服务器地址</label><input class="input" id="api-base" name="apiBase" value="').concat(esc(app.settings.apiBase), '" placeholder="https://order.example.com"><div class="field-help">填写 HTTPS 反向代理地址，例如 https://order.example.com。</div></div><div class="field full"><label for="sync-token">同步令牌</label><input class="input" id="sync-token" name="token" type="password" value="').concat(esc(app.settings.token), '" autocomplete="off" placeholder="从服务器 runtime/sync-token 读取"><div class="field-help">令牌只保存于本机 WebView，不会写入业务 Git 仓库。</div></div></div><div class="sync-actions"><button class="button" type="submit">保存连接</button><button class="button button-quiet" type="button" data-action="sync-test">测试当前输入</button><button class="button button-quiet" type="button" data-action="sync-upload">上传待处理</button><button class="button button-quiet" type="button" data-action="sync-download">下载并覆盖</button></div><p class="field-help sync-action-help"><span class="phrase">测试只使用当前输入且不会保存；</span><span class="phrase">上传和下载只使用已保存的连接。</span><span class="phrase">下载会以服务器数据覆盖本机。</span></p></form></div></article>\n        <article class="panel"><div class="panel-heading"><h2>同步状态</h2><span class="muted small">').concat(queueSummary(), '</span></div><div class="panel-body padded"><div class="sync-counts"><div><span>待上传操作</span><strong>').concat(pending, "</strong></div><div><span>失败待处理</span><strong>").concat(failed, "</strong></div></div>").concat(legacyBindingAction).concat(app.syncError ? '<div class="danger-box">'.concat(esc(app.syncError), "</div>") : '<div class="info-box">待上传数量只代表尚未送到服务器的本地操作，不代表本机业务数据条数。成功同步后为 0 是正常状态。</div>').concat(recoveryCount ? '<div class="warning-box">已完整保留 '.concat(recoveryCount, ' 份原始本地恢复副本。请先全部导出，再决定是否下载覆盖。</div><div class="backup-actions"><button class="button button-quiet" data-action="export-recovery">导出 ').concat(recoveryCount, " 份原始恢复数据</button></div>") : "").concat(failedOperations.length ? '<div class="failed-operation-list">'.concat(failedOperations.map((operation) => '<div class="failed-operation"><div><strong>'.concat(esc(operationLabel(operation.type)), "</strong><span>").concat(esc(dateText(operation.createdAt)), "</span></div><p>").concat(esc(operation.syncError), '</p><div class="inline-actions"><button class="link-button" data-action="retry-failed" data-id="').concat(esc(operation.opId), '">换新编号重试</button><button class="link-button danger" data-action="discard-failed" data-id="').concat(esc(operation.opId), '">安全丢弃此条</button></div></div>')).join(""), '</div><div class="warning-box">失败操作不会自动重复提交。重试会生成新的操作编号；安全丢弃会先从已绑定服务器拉取权威状态，再重放其余队列。离线、服务器不符或任一重放失败时不会更改本机数据。</div>') : "", '</div></article>\n        <article class="panel"><div class="panel-heading"><h2>数据备份</h2></div><div class="panel-body padded"><div class="backup-actions"><button class="button button-quiet" data-action="export-local">导出本机数据</button><button class="button button-quiet" data-action="export-server">导出服务器数据</button></div><p class="field-help" style="margin-top:12px">导出内容可能包含完整业务数据。手机端会打开系统保存位置，也可以复制 JSON 内容。</p></div></article>\n      </section>');
   }
   function render(options = {}) {
     let settingsDraft = null;
@@ -2045,17 +2134,71 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }));
     return { report: { id, occurredAt: form.elements.occurredAt.value, originalMessage: form.elements.originalMessage.value }, items };
   }
+  function retainedRebate(item, amount = Domain.actualRebateForItem(item)) {
+    return amount - Domain.amountForQuantity(amount, item.quantity, Domain.refundQuantity(app.state, item.id));
+  }
+  function rebateEditor(reportId) {
+    const report = Domain.reportById(app.state, reportId);
+    if (!report) {
+      toast("报单不存在或已作废", true);
+      return;
+    }
+    const items = reportItems(reportId);
+    openModal("调整实际返利", '<form data-form="rebate"><div class="info-box rebate-intro" id="rebate-help">填写原始整批商品的总返利，不是单件或剩余商品金额。系统会按已退款数量自动扣除对应返利。默认按预计全额计入，也可自定义为 0；出库或快递结单后仍可调整，不改变商品付款和快递返款。</div><div class="rebate-items">'.concat(items.map((item, index) => {
+      const useExpected = item.actualRebateCents == null;
+      const amount = Domain.actualRebateForItem(item);
+      return '<section class="rebate-item-editor" data-item-id="'.concat(esc(item.id), '" aria-labelledby="rebate-title-').concat(index, '"><h3 id="rebate-title-').concat(index, '">').concat(esc(productLabel(item)), '</h3><div class="rebate-item-meta"><span>原数量 ').concat(item.quantity, " 件</span><span>已退款 ").concat(Domain.refundQuantity(app.state, item.id), " 件</span><span>整批预计 ").concat(money(item.expectedRebateCents), '</span></div><label class="rebate-default"><input type="checkbox" data-field="useExpected"').concat(useExpected ? " checked" : "", '><span>按预计全额（默认）</span></label><div class="field"><label for="rebate-amount-').concat(index, '">整批实际返利（元）</label><input class="input" id="rebate-amount-').concat(index, '" data-field="actualRebateCents" inputmode="decimal" value="').concat(esc(valueMoney(amount)), '" aria-describedby="rebate-help rebate-preview-').concat(index, '" required').concat(useExpected ? " disabled" : "", '></div><p class="rebate-preview" id="rebate-preview-').concat(index, '" data-rebate-preview>计入利润：').concat(money(retainedRebate(item, amount)), "（已扣除退款部分）</p></section>");
+    }).join(""), '</div><p class="field-help rebate-help">勾选默认可恢复跟随预计返利；取消勾选后，填写自定义金额。已退款部分会自动排除，不必手动减去。</p><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存返利</button></div><input type="hidden" name="id" value="').concat(esc(reportId), '"></form>'), true);
+  }
+  function collectRebateForm(form) {
+    return {
+      id: form.elements.id.value,
+      items: $$(".rebate-item-editor", form).map((row) => ({
+        id: row.dataset.itemId,
+        actualRebateCents: $('[data-field="useExpected"]', row).checked ? null : Domain.parseMoney($('[data-field="actualRebateCents"]', row).value, "实际返利")
+      }))
+    };
+  }
+  function updateRebatePreview(form) {
+    $$(".rebate-item-editor", form).forEach((row) => {
+      const item = Domain.itemById(app.state, row.dataset.itemId);
+      const useExpected = $('[data-field="useExpected"]', row).checked;
+      const input = $('[data-field="actualRebateCents"]', row);
+      const preview = $("[data-rebate-preview]", row);
+      if (!item || !preview) return;
+      if (input.disabled !== useExpected) {
+        if (useExpected) {
+          input.dataset.customValue = input.value;
+          input.value = valueMoney(item.expectedRebateCents);
+        } else if (input.dataset.customValue !== void 0) {
+          input.value = input.dataset.customValue;
+        }
+      }
+      input.disabled = useExpected;
+      try {
+        const amount = useExpected ? item.expectedRebateCents : Domain.parseMoney(input.value, "实际返利");
+        preview.className = "rebate-preview";
+        preview.textContent = "计入利润：".concat(money(retainedRebate(item, amount)), "（已扣除退款部分）");
+      } catch (error) {
+        preview.className = "rebate-preview rebate-preview-error";
+        preview.textContent = error.message;
+      }
+    });
+  }
   function productOptions(excludeShipmentId = "") {
     return Domain.aggregateInventory(app.state, { excludeShipmentId }).sort((a, b) => a.productName.localeCompare(b.productName)).map((product) => '<option value="'.concat(esc(product.productName), '">').concat(esc(product.productName), "（余 ").concat(product.availableQuantity, "）</option>")).join("");
   }
   function shipmentEditor(shipmentId) {
     const existing = shipmentId ? shipmentViews().find((view) => view.shipment.id === shipmentId) : null;
-    const lines = existing ? Object.values(existing.items.reduce((map, item) => {
-      const key = item.productName;
-      map[key] = map[key] || { productName: key, quantity: 0 };
-      map[key].quantity += item.quantity;
-      return map;
-    }, {})) : [{ productName: "", quantity: 1 }];
+    const grouped = /* @__PURE__ */ new Map();
+    if (existing) {
+      for (const item of existing.items) {
+        const line = grouped.get(item.productName) || { productName: item.productName, quantity: 0 };
+        line.quantity += item.quantity;
+        grouped.set(item.productName, line);
+      }
+    }
+    const lines = existing ? [...grouped.values()] : [{ productName: "", quantity: 1 }];
     const options = productOptions(shipmentId || "");
     openModal(existing ? "编辑快递" : "新增快递", '<form data-form="shipment"><div class="form-grid"><div class="field"><label>快递单号</label><input class="input" name="trackingNumber" value="'.concat(esc((existing == null ? void 0 : existing.shipment.trackingNumber) || ""), '" required placeholder="单号"></div><div class="field"><label>快递价格</label><input class="input" name="shippingCost" inputmode="decimal" value="').concat(esc(valueMoney((existing == null ? void 0 : existing.shipment.shippingCostCents) || 0)), '" required></div><div class="field"><label>发出时间</label><input class="input" name="shippedAt" type="datetime-local" value="').concat(esc(dateInputValue(existing == null ? void 0 : existing.shipment.shippedAt)), '" required></div><div class="field"><label>备注</label><input class="input" name="note" value="').concat(esc((existing == null ? void 0 : existing.shipment.note) || ""), '" placeholder="可选"></div></div><div class="modal-section"><div class="modal-section-heading"><h3>快递内容</h3><button class="button button-small button-quiet" type="button" data-action="add-shipment-item">添加商品行</button></div><div class="field-help" style="margin-bottom:10px">保存时会按报单时间从早到晚自动扣除库存批次。</div><div class="table-wrap"><table class="editor-table"><thead><tr><th>商品</th><th>数量</th><th></th></tr></thead><tbody id="shipment-items-editor">').concat(lines.map((line) => shipmentItemEditorRow(line, options)).join(""), '</tbody></table></div><div id="shipment-financial-preview" class="info-box shipment-financial-preview"></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存快递</button></div><input type="hidden" name="id" value="').concat(esc((existing == null ? void 0 : existing.shipment.id) || ""), '"></form>'), true);
     updateShipmentFinancialPreview($('form[data-form="shipment"]'));
@@ -2099,10 +2242,11 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
         sum.actualPaymentCents += allocation.actualPaymentCents;
         sum.expectedRefundCents += allocation.expectedRefundCents;
         sum.expectedRebateCents += allocation.expectedRebateCents;
+        sum.actualRebateCents += allocation.actualRebateCents;
         return sum;
-      }, { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 });
+      }, { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0, actualRebateCents: 0 });
       output.className = "info-box shipment-financial-preview";
-      output.textContent = "所含商品实际付款 ".concat(money(totals.actualPaymentCents), " · 预计返款 ").concat(money(totals.expectedRefundCents), " · 预计返利 ").concat(money(totals.expectedRebateCents));
+      output.textContent = "所含商品实际付款 ".concat(money(totals.actualPaymentCents), " · 预计返款 ").concat(money(totals.expectedRefundCents), " · 预计返利 ").concat(money(totals.expectedRebateCents), " · 实际返利 ").concat(money(totals.actualRebateCents));
     } catch (error) {
       output.className = "warning-box shipment-financial-preview";
       output.textContent = error.message;
@@ -2111,7 +2255,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function settlementEditor(shipmentId, settlementId = "") {
     const view = shipmentViews().find((item) => item.shipment.id === shipmentId);
     const settlement = view == null ? void 0 : view.settlements.find((item) => item.id === settlementId);
-    openModal(settlement ? "编辑返款" : "落实快递返款", '<form data-form="settlement"><div class="info-box" style="margin-bottom:16px">'.concat(esc((view == null ? void 0 : view.shipment.trackingNumber) || ""), " · 预计返款 ").concat(money((view == null ? void 0 : view.expectedRefundCents) || 0), " · 已登记 ").concat(money((view == null ? void 0 : view.returnedCents) || 0), '<span class="stat-subfoot">当前差额：').concat(esc(refundDifferenceText(((view == null ? void 0 : view.returnedCents) || 0) - ((view == null ? void 0 : view.expectedRefundCents) || 0))), '</span></div><div class="field-help">实际返款不包含商品预计返利；预计返利会单独计入利润。结单后，已登记返款总额会作为这批快递的最终价值。</div><div class="form-grid"><div class="field"><label>实际返款金额</label><input class="input" name="amount" inputmode="decimal" value="').concat(esc(valueMoney((settlement == null ? void 0 : settlement.amountCents) || 0)), '" required></div><div class="field"><label>返款时间</label><input class="input" name="settledAt" type="datetime-local" value="').concat(esc(dateInputValue(settlement == null ? void 0 : settlement.settledAt)), '" required></div><div class="field full"><label>备注</label><input class="input" name="note" value="').concat(esc((settlement == null ? void 0 : settlement.note) || ""), '" placeholder="可选"></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存返款</button></div><input type="hidden" name="shipmentId" value="').concat(esc(shipmentId), '"><input type="hidden" name="id" value="').concat(esc((settlement == null ? void 0 : settlement.id) || ""), '"></form>'));
+    openModal(settlement ? "编辑返款" : "落实快递返款", '<form data-form="settlement"><div class="info-box" style="margin-bottom:16px">'.concat(esc((view == null ? void 0 : view.shipment.trackingNumber) || ""), " · 预计返款 ").concat(money((view == null ? void 0 : view.expectedRefundCents) || 0), " · 已登记 ").concat(money((view == null ? void 0 : view.returnedCents) || 0), '<span class="stat-subfoot">当前差额：').concat(esc(refundDifferenceText(((view == null ? void 0 : view.returnedCents) || 0) - ((view == null ? void 0 : view.expectedRefundCents) || 0))), '</span></div><div class="field-help">实际返款不包含商品返利；实际返利会单独计入利润，默认按预计全额计算。结单后返款金额锁定，返利仍可在报单中调整。</div><div class="form-grid"><div class="field"><label>实际返款金额</label><input class="input" name="amount" inputmode="decimal" value="').concat(esc(valueMoney((settlement == null ? void 0 : settlement.amountCents) || 0)), '" required></div><div class="field"><label>返款时间</label><input class="input" name="settledAt" type="datetime-local" value="').concat(esc(dateInputValue(settlement == null ? void 0 : settlement.settledAt)), '" required></div><div class="field full"><label>备注</label><input class="input" name="note" value="').concat(esc((settlement == null ? void 0 : settlement.note) || ""), '" placeholder="可选"></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存返款</button></div><input type="hidden" name="shipmentId" value="').concat(esc(shipmentId), '"><input type="hidden" name="id" value="').concat(esc((settlement == null ? void 0 : settlement.id) || ""), '"></form>'));
   }
   function refundEditor(refundId = "", itemId = "") {
     const refund = refundId ? app.state.refunds.find((row) => row.id === refundId) : null;
@@ -2313,6 +2457,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       navigateView("settings");
     } else if (action === "new-report") reportEditor();
     else if (action === "edit-report") reportEditor(target.dataset.id);
+    else if (action === "edit-rebate") rebateEditor(target.dataset.id);
     else if (action === "void-report") {
       confirmAction("作废报单", "确定作废这笔报单吗？未使用的库存会一并退出。", () => dispatch("report.void", { id: target.dataset.id }));
     } else if (action === "new-shipment") shipmentEditor();
@@ -2325,7 +2470,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       const expected = (view == null ? void 0 : view.expectedRefundCents) || 0;
       const returned = (view == null ? void 0 : view.returnedCents) || 0;
       const detail = "预计返款 ".concat(money(expected), "，当前已登记 ").concat(money(returned), "（").concat(refundDifferenceText(returned - expected), "）。");
-      confirmAction("结单快递", "".concat(detail, "结单后已登记返款总额会作为这批快递的最终价值，不能继续编辑；如需修改，请先撤销结单。"), () => dispatch("shipment.close", { id: target.dataset.id }));
+      confirmAction("结单快递", "".concat(detail, "结单后不能继续编辑快递或返款；如需修改，请先撤销结单。实际返利仍可在报单中单独调整。"), () => dispatch("shipment.close", { id: target.dataset.id }));
     } else if (action === "reopen-shipment") {
       confirmAction("撤销结单", "撤销后可以继续登记或修改这笔快递的返款，是否继续？", () => dispatch("shipment.reopen", { id: target.dataset.id }));
     } else if (action === "add-settlement") settlementEditor(target.dataset.id);
@@ -2360,10 +2505,12 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     else if (action === "save-export") saveExportFile();
   });
   document.addEventListener("input", (event) => {
-    var _a, _b, _c, _d;
-    const refundForm = (_b = (_a = event.target).closest) == null ? void 0 : _b.call(_a, 'form[data-form="refund"]');
+    var _a, _b, _c, _d, _e, _f;
+    const rebateForm = (_b = (_a = event.target).closest) == null ? void 0 : _b.call(_a, 'form[data-form="rebate"]');
+    if (rebateForm) updateRebatePreview(rebateForm);
+    const refundForm = (_d = (_c = event.target).closest) == null ? void 0 : _d.call(_c, 'form[data-form="refund"]');
     if (refundForm) updateRefundAmount(refundForm);
-    const shipmentForm = (_d = (_c = event.target).closest) == null ? void 0 : _d.call(_c, 'form[data-form="shipment"]');
+    const shipmentForm = (_f = (_e = event.target).closest) == null ? void 0 : _f.call(_e, 'form[data-form="shipment"]');
     if (shipmentForm) updateShipmentFinancialPreview(shipmentForm);
     if (event.target.dataset.search) {
       app.search = event.target.value;
@@ -2376,10 +2523,12 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }
   });
   document.addEventListener("change", (event) => {
-    var _a, _b, _c, _d;
-    const refundForm = (_b = (_a = event.target).closest) == null ? void 0 : _b.call(_a, 'form[data-form="refund"]');
+    var _a, _b, _c, _d, _e, _f;
+    const rebateForm = (_b = (_a = event.target).closest) == null ? void 0 : _b.call(_a, 'form[data-form="rebate"]');
+    if (rebateForm) updateRebatePreview(rebateForm);
+    const refundForm = (_d = (_c = event.target).closest) == null ? void 0 : _d.call(_c, 'form[data-form="refund"]');
     if (refundForm) updateRefundAmount(refundForm);
-    const shipmentForm = (_d = (_c = event.target).closest) == null ? void 0 : _d.call(_c, 'form[data-form="shipment"]');
+    const shipmentForm = (_f = (_e = event.target).closest) == null ? void 0 : _f.call(_e, 'form[data-form="shipment"]');
     if (shipmentForm) updateShipmentFinancialPreview(shipmentForm);
   });
   document.addEventListener("submit", (event) => {
@@ -2389,6 +2538,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       if (form.dataset.form === "report") {
         const payload = collectReportForm(form);
         dispatch(form.elements.id.value ? "report.update" : "report.create", payload);
+      } else if (form.dataset.form === "rebate") {
+        dispatch("report.rebate.update", collectRebateForm(form));
       } else if (form.dataset.form === "shipment") {
         const payload = collectShipmentForm(form);
         dispatch(form.elements.id.value ? "shipment.update" : "shipment.create", payload);
@@ -2428,7 +2579,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   localStorageRead();
   render();
   if (window.OrderReportBoot) window.OrderReportBoot.ready();
-  if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register("sw.js").catch(() => {
+  if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register("sw.js?v=11").catch(() => {
   });
   sync();
   window.addEventListener("online", sync);
