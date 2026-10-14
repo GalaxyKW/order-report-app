@@ -14,7 +14,7 @@ const presentationSource = `${source.slice(0, startupIndex)}
   window.__ui = {
     app, icon, emptyState, dashboardQuickActions, renderDashboard, renderReports,
     renderShipments, renderInventory, renderRefunds, renderSettings, render, navigateView, shipmentEditor,
-    rebateEditor, collectRebateForm, updateRebatePreview, reportItemEditorRow, collectReportForm,
+    rebateEditor, shipmentRebateEditor, collectRebateForm, updateRebatePreview, reportEditor, reportItemEditorRow, collectReportForm,
   };
 })();`;
 const views = ['dashboard', 'reports', 'shipments', 'inventory', 'refunds', 'settings'];
@@ -225,6 +225,139 @@ function applyRebate(state, payload) {
     type: 'report.rebate.update', payload, opId: 'ui_rebate_op', clientId: 'ui_fixture',
   }, { now: '2026-09-14T10:00:00.000Z' }).state;
 }
+
+function shipmentRebateState({ multipleReports = false, duplicateSource = false } = {}) {
+  let state = Domain.emptyState();
+  let serial = 0;
+  const apply = (type, payload) => {
+    state = Domain.applyOperation(state, {
+      type, payload, opId: `shipment-rebate-op-${++serial}`, clientId: 'ui-fixture',
+    }, { now: '2026-10-14T10:00:00.000Z', idFactory: (prefix) => `${prefix}-rebate-${++serial}` }).state;
+  };
+  apply('report.create', {
+    report: { id: 'rebate-source-a', occurredAt: '2026-10-01T09:00', originalMessage: '虚构报单甲' },
+    items: [
+      { id: 'rebate-item-a', productName: '示例笔记本', quantity: 3, actualPaymentCents: 3000, expectedRefundCents: 3600, expectedRebateCents: 600 },
+      { id: 'rebate-unrelated', productName: '未随此快递发出的虚构商品', quantity: 1, actualPaymentCents: 500, expectedRefundCents: 500, expectedRebateCents: 100 },
+    ],
+  });
+  if (multipleReports) apply('report.create', {
+    report: { id: 'rebate-source-b', occurredAt: '2026-10-02T09:00', originalMessage: '虚构报单乙' },
+    items: [{ id: 'rebate-item-b', productName: '示例笔记本', quantity: 2, actualPaymentCents: 2000, expectedRefundCents: 2400, expectedRebateCents: 400 }],
+  });
+  apply('shipment.create', {
+    shipment: { id: 'rebate-closed-shipment', trackingNumber: 'DEMO-CLOSED-ONLY', shippingCostCents: 0, shippedAt: '2026-10-03' },
+    items: [{ productName: '示例笔记本', quantity: multipleReports ? 4 : 2 }],
+  });
+  if (duplicateSource) {
+    const allocation = state.shipmentItems[0];
+    allocation.quantity -= 1;
+    state.shipmentItems.push({ ...allocation, id: 'rebate-duplicate-source', quantity: 1 });
+  }
+  apply('settlement.create', { settlement: { id: 'rebate-settlement', shipmentId: 'rebate-closed-shipment', amountCents: multipleReports ? 4800 : 2400, settledAt: '2026-10-04' } });
+  apply('shipment.close', { id: 'rebate-closed-shipment' });
+  assert.equal(Domain.isStateSnapshot(state), true);
+  return state;
+}
+
+test('closed shipments expose rebate adjustment without unlocking fulfillment or settlement editing', () => {
+  const ui = createHarness();
+  ui.app.state = shipmentRebateState();
+  const before = JSON.stringify(ui.app.state);
+  const closed = ui.renderShipments();
+  assert.match(closed, /data-action="edit-shipment-rebate" data-id="rebate-closed-shipment"/);
+  assert.match(closed, /data-action="reopen-shipment"/);
+  for (const action of ['edit-shipment', 'void-shipment', 'add-settlement', 'edit-settlement', 'void-settlement']) {
+    assert.ok(!closed.includes(`data-action="${action}"`), `closed shipment must not expose ${action}`);
+  }
+  assert.equal(JSON.stringify(ui.app.state), before, 'rendering the new action must not mutate the closed shipment');
+  ui.app.state.shipments[0].closedAt = null;
+  const open = ui.renderShipments();
+  assert.match(open, /data-action="edit-shipment-rebate" data-id="rebate-closed-shipment"/);
+  assert.match(open, /data-action="edit-shipment"/);
+  assert.match(open, /data-action="add-settlement"/);
+});
+
+test('a single-source shipment opens only its source items and explains original-batch scope', () => {
+  const ui = createHarness();
+  ui.app.state = shipmentRebateState();
+  const before = JSON.stringify(ui.app.state);
+  ui.shipmentRebateEditor('rebate-closed-shipment');
+  const html = ui.modal.innerHTML;
+  assert.match(html, /form data-form="rebate"/);
+  assert.match(html, /name="id" value="rebate-source-a"/);
+  assert.match(html, /data-item-id="rebate-item-a"/);
+  assert.equal((html.match(/class="rebate-item-editor"/g) || []).length, 1);
+  assert.ok(!html.includes('rebate-unrelated'), 'unshipped items from the same report must not be editable here');
+  assert.ok(!html.includes('未随此快递发出的虚构商品'));
+  assert.match(html, /DEMO-CLOSED-ONLY/);
+  assert.match(html, /原数量 3 件/);
+  assert.match(html, /value="6\.00"/);
+  assert.match(html, /同[一批]/);
+  assert.match(html, /结单/);
+  assert.equal(JSON.stringify(ui.app.state), before, 'opening the editor must not modify settlements or closure');
+});
+
+test('repeated allocations from one source item produce one rebate editor row', () => {
+  const ui = createHarness();
+  ui.app.state = shipmentRebateState({ duplicateSource: true });
+  assert.equal(ui.app.state.shipmentItems.length, 2);
+  ui.shipmentRebateEditor('rebate-closed-shipment');
+  assert.equal((ui.modal.innerHTML.match(/class="rebate-item-editor"/g) || []).length, 1);
+  assert.equal((ui.modal.innerHTML.match(/data-item-id="rebate-item-a"/g) || []).length, 1);
+  assert.ok(!ui.modal.innerHTML.includes('rebate-unrelated'));
+});
+
+test('a multi-report shipment requires a source choice and edits each original batch separately', () => {
+  const ui = createHarness();
+  ui.app.state = shipmentRebateState({ multipleReports: true });
+  const before = JSON.stringify(ui.app.state);
+  ui.shipmentRebateEditor('rebate-closed-shipment');
+  const picker = ui.modal.innerHTML;
+  assert.match(picker, /shipment-rebate-picker/);
+  assert.doesNotMatch(picker, /form data-form="rebate"/);
+  const buttons = picker.match(/<button\b[^>]*data-action="choose-shipment-rebate"[^>]*>/g) || [];
+  assert.equal(buttons.length, 2);
+  for (const source of ['a', 'b']) {
+    const button = buttons.find((row) => row.includes(`data-id="rebate-source-${source}"`));
+    assert.ok(button, `source ${source} must be selectable`);
+    assert.ok(button.includes('data-shipment-id="rebate-closed-shipment"'));
+    ui.shipmentRebateEditor('rebate-closed-shipment', `rebate-source-${source}`);
+    assert.match(ui.modal.innerHTML, /form data-form="rebate"/);
+    assert.ok(ui.modal.innerHTML.includes(`name="id" value="rebate-source-${source}"`));
+    assert.ok(ui.modal.innerHTML.includes(`data-item-id="rebate-item-${source}"`));
+    assert.equal((ui.modal.innerHTML.match(/class="rebate-item-editor"/g) || []).length, 1);
+    assert.ok(!ui.modal.innerHTML.includes('rebate-unrelated'));
+  }
+  assert.equal(JSON.stringify(ui.app.state), before);
+});
+
+test('shipment rebate context keeps source labels and tracking numbers escaped', () => {
+  const ui = createHarness();
+  ui.app.state = shipmentRebateState({ multipleReports: true });
+  const unsafe = '<img src=x onerror=alert(1)>';
+  ui.app.state.reportItems.forEach((item) => { item.productName = unsafe; });
+  ui.app.state.shipments[0].trackingNumber = unsafe;
+  ui.shipmentRebateEditor('rebate-closed-shipment');
+  assert.ok(!ui.modal.innerHTML.includes(unsafe));
+  assert.ok(ui.modal.innerHTML.includes('&lt;img src=x onerror=alert(1)&gt;'));
+  ui.shipmentRebateEditor('rebate-closed-shipment', 'rebate-source-a');
+  assert.ok(!ui.modal.innerHTML.includes(unsafe));
+  assert.ok(ui.modal.innerHTML.includes('&lt;img src=x onerror=alert(1)&gt;'));
+});
+
+test('the ordinary report editor points closed orders to the separate actual-rebate operation', () => {
+  const ui = createHarness();
+  ui.app.state = shipmentRebateState();
+  const before = JSON.stringify(ui.app.state);
+  ui.reportEditor('rebate-source-a');
+  assert.match(ui.modal.innerHTML, /预计返利保留原始预估/);
+  assert.match(ui.modal.innerHTML, /报单或快递列表点击「调整返利」/);
+  assert.match(ui.modal.innerHTML, /已结单也可修改，无需撤销结单/);
+  assert.doesNotMatch(ui.modal.innerHTML, /data-field="actualRebateCents"/);
+  assert.match(ui.modal.innerHTML, /data-field="expectedRebateCents"/);
+  assert.equal(JSON.stringify(ui.app.state), before);
+});
 
 test('the rebate editor explains original-batch amounts and remains available after shipment closure', () => {
   const ui = createHarness();

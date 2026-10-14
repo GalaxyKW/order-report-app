@@ -7,6 +7,11 @@ const { spawnSync } = require('node:child_process');
 
 const stylesheet = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
 
+test('save notices do not block controls and wide tables cannot expand the main grid item', () => {
+  assert.match(stylesheet, /#toast-root\s*\{[^}]*pointer-events:\s*none\s*;/);
+  assert.match(stylesheet, /\.main-content\s*\{[^}]*min-width:\s*0\s*;/);
+});
+
 // This is a layout regression test, not an emulator. Remove declarations that
 // Chromium 61 cannot parse; grid-gap intentionally survives as the old alias.
 function legacyStyles(source) {

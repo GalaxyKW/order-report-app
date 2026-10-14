@@ -124,10 +124,36 @@ function previewStorage() {
     opId: 'preview-op', clientId: 'preview-client', createdAt: now, type: 'report.create',
     payload: {
       report: { id: 'preview-report', occurredAt: now, originalMessage: '仅供界面测试的虚构报单' },
-      items: [{ id: 'preview-item', productName: '示例收纳盒', note: '浅蓝色', quantity: 3, actualPaymentCents: 12800, expectedRefundCents: 13800, expectedRebateCents: 600 }],
+      items: [
+        { id: 'preview-item', productName: '示例收纳盒', note: '浅蓝色', quantity: 3, actualPaymentCents: 12800, expectedRefundCents: 13800, expectedRebateCents: 600 },
+        { id: 'preview-unrelated-item', productName: '尚未发货的示例便签', quantity: 2, actualPaymentCents: 400, expectedRefundCents: 400, expectedRebateCents: 0 },
+      ],
     },
   };
-  const { state } = Domain.applyOperation(Domain.emptyState(), op, { now, idFactory: (prefix) => `preview-${prefix}` });
+  let { state } = Domain.applyOperation(Domain.emptyState(), op, { now, idFactory: (prefix) => `preview-${prefix}` });
+  let serial = 0;
+  const apply = (type, payload) => {
+    state = Domain.applyOperation(state, {
+      opId: `preview-closed-op-${++serial}`, clientId: 'preview-client', createdAt: now, type, payload,
+    }, { now, idFactory: (prefix) => `preview-closed-${prefix}-${++serial}` }).state;
+  };
+  apply('shipment.create', {
+    shipment: { id: 'preview-closed-shipment', trackingNumber: 'DEMO-CLOSED-ONLY', shippedAt: '2026-09-02', shippingCostCents: 0 },
+    items: [{ productName: '示例收纳盒', quantity: 2 }],
+  });
+  apply('settlement.create', { settlement: { id: 'preview-settlement', shipmentId: 'preview-closed-shipment', amountCents: 9200, settledAt: '2026-09-03' } });
+  apply('shipment.close', { id: 'preview-closed-shipment' });
+  apply('report.create', {
+    report: { id: 'preview-second-report', occurredAt: '2026-09-02T10:00', originalMessage: '另一笔仅供测试的虚构报单' },
+    items: [{ id: 'preview-second-item', productName: '示例文件袋', quantity: 1, actualPaymentCents: 500, expectedRefundCents: 500, expectedRebateCents: 0 }],
+  });
+  apply('shipment.create', {
+    shipment: { id: 'preview-multi-shipment', trackingNumber: 'DEMO-MULTI-SOURCE', shippedAt: '2026-09-04', shippingCostCents: 0 },
+    items: [{ productName: '示例收纳盒', quantity: 1 }, { productName: '示例文件袋', quantity: 1 }],
+  });
+  apply('settlement.create', { settlement: { id: 'preview-multi-settlement', shipmentId: 'preview-multi-shipment', amountCents: 5100, settledAt: '2026-09-05' } });
+  apply('shipment.close', { id: 'preview-multi-shipment' });
+  assert.equal(Domain.isStateSnapshot(state), true);
   return { state, queue: [], settings: { apiBase: '', token: '' }, clientId: 'preview-client', localRevision: 0, storageRevision: 0, hasSynced: false };
 }
 
@@ -161,7 +187,15 @@ function layoutReport() {
     if (!visible(button)) continue;
     const rect = button.getBoundingClientRect();
     const label = button.textContent.trim().replace(/\s+/g, ' ').slice(0, 60);
-    if (rect.left < -1 || rect.right > innerWidth + 1) issues.push(`button outside viewport: ${label} (${rect.left.toFixed(1)}..${rect.right.toFixed(1)})`);
+    // Tablet tables deliberately scroll inside their bounded panel. Their
+    // clipped columns are not page overflow; the interaction helper still
+    // scrolls each action into view and proves the click hits that control.
+    const scroller = button.closest('.table-wrap');
+    const scrollBounds = scroller && scroller.getBoundingClientRect();
+    const horizontallyScrollable = scroller && /^(auto|scroll)$/.test(getComputedStyle(scroller).overflowX)
+      && scroller.scrollWidth > scroller.clientWidth + 1
+      && scrollBounds.left >= -1 && scrollBounds.right <= innerWidth + 1;
+    if ((rect.left < -1 || rect.right > innerWidth + 1) && !horizontallyScrollable) issues.push(`button outside viewport: ${label} (${rect.left.toFixed(1)}..${rect.right.toFixed(1)})`);
     if (button.scrollWidth > button.clientWidth + 1) issues.push(`button contents overflow: ${label} (${button.scrollWidth}/${button.clientWidth})`);
     if (button.matches('.button, .link-button') && textLines(button) > 1) issues.push(`short button label wraps: ${label}`);
   }
@@ -228,7 +262,11 @@ test('real packaged pages keep responsive navigation, actions and dialogs usable
         if (!element) throw new Error('Missing control: ' + ${JSON.stringify(selector)});
         element.scrollIntoView({block:'center', inline:'center'});
         const rect = element.getBoundingClientRect();
-        return { x:rect.left + rect.width / 2, y:rect.top + rect.height / 2 };
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        if (!hit || !element.contains(hit)) throw new Error('Control is obstructed: ' + ${JSON.stringify(selector)} + '; hit ' + (hit ? hit.outerHTML.slice(0, 300) : 'nothing'));
+        return { x, y };
       })()`);
       await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
       await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
@@ -321,6 +359,13 @@ test('real packaged pages keep responsive navigation, actions and dialogs usable
             value: item.actualRebateCents == null ? null : item.actualRebateCents,
             operationType: lastOperation.type, operationValue: lastOperation.payload.items[0].actualRebateCents };
         })()`);
+        const closedFinancials = () => evaluate(`(() => {
+          const state = JSON.parse(localStorage.getItem('order-report-local-v1')).state;
+          return { shipments: state.shipments, shipmentItems: state.shipmentItems, settlements: state.settlements };
+        })()`);
+        const originalClosedFinancials = await closedFinancials();
+        assert.ok(originalClosedFinancials.shipments[0].closedAt, 'the private-data-free fixture must start with a closed shipment');
+        assert.equal(originalClosedFinancials.settlements.length, 2);
 
         await checkProfit('16.00');
         await openRebate();
@@ -358,6 +403,59 @@ test('real packaged pages keep responsive navigation, actions and dialogs usable
         assert.equal((await rebateEditorState()).useExpected, true, 'restoring the default must survive reopening');
         await click('.modal-heading [data-action="close-modal"]');
         assert.equal(await evaluate('!!document.querySelector(".modal")'), false);
+
+        const openClosedShipmentRebate = async () => {
+          await click('.nav-item[data-view="shipments"] svg');
+          assert.equal(await evaluate(`!!document.querySelector('[data-action="edit-shipment"][data-id="preview-closed-shipment"], [data-action="add-settlement"][data-id="preview-closed-shipment"], [data-action="edit-settlement"][data-shipment-id="preview-closed-shipment"]')`), false, 'closed fulfillment and settlements must remain locked');
+          await click('[data-action="edit-shipment-rebate"][data-id="preview-closed-shipment"]');
+          assert.ok(await evaluate('!!document.querySelector("form[data-form=rebate]")'), 'closed shipment entry must open the rebate editor directly for one source');
+          assert.equal(await evaluate('document.querySelectorAll(".rebate-item-editor").length'), 1);
+          assert.ok(await evaluate('document.querySelector(".modal").textContent.includes("DEMO-CLOSED-ONLY")'), 'the source dialog must identify the originating shipment');
+        };
+        await openClosedShipmentRebate();
+        await checkLayout('closed-shipment-rebate-default');
+        await screenshot(`${width}-closed-shipment-rebate`);
+        await click(defaultCheckbox);
+        await fill(amountInput, '0');
+        await saveRebate();
+        assert.deepEqual(await persistedRebate(), {
+          hasOverride: true, value: 0, operationType: 'report.rebate.update', operationValue: 0,
+        });
+        assert.deepEqual(await closedFinancials(), originalClosedFinancials, 'saving zero from a closed shipment must not reopen it or rewrite the final return');
+        await checkProfit('10.00');
+        await openClosedShipmentRebate();
+        assert.equal((await rebateEditorState()).value, '0.00');
+        await fill(amountInput, '2.35');
+        await checkLayout('closed-shipment-custom-rebate');
+        await saveRebate();
+        assert.deepEqual(await persistedRebate(), {
+          hasOverride: true, value: 235, operationType: 'report.rebate.update', operationValue: 235,
+        });
+        assert.deepEqual(await closedFinancials(), originalClosedFinancials, 'a custom amount must leave the closed shipment and settlement exactly unchanged');
+        await checkProfit('12.35');
+        await openClosedShipmentRebate();
+        assert.equal((await rebateEditorState()).value, '2.35');
+        await click(defaultCheckbox);
+        await saveRebate();
+        assert.deepEqual(await persistedRebate(), {
+          hasOverride: false, value: null, operationType: 'report.rebate.update', operationValue: null,
+        });
+        assert.deepEqual(await closedFinancials(), originalClosedFinancials, 'restoring the rebate default must preserve closure and the settlement ledger');
+        await checkProfit('16.00');
+        for (const [reportId, itemId] of [['preview-report', 'preview-item'], ['preview-second-report', 'preview-second-item']]) {
+          await click('.nav-item[data-view="shipments"] svg');
+          await click('[data-action="edit-shipment-rebate"][data-id="preview-multi-shipment"]');
+          assert.ok(await evaluate('!!document.querySelector(".shipment-rebate-picker")'), 'mixed-source shipment must let the user choose the original report');
+          assert.equal(await evaluate('document.querySelectorAll("[data-action=choose-shipment-rebate]").length'), 2);
+          await checkLayout('closed-multi-source-picker');
+          if (reportId === 'preview-report') await screenshot(`${width}-closed-multi-source-picker`);
+          await click(`[data-action="choose-shipment-rebate"][data-id="${reportId}"][data-shipment-id="preview-multi-shipment"]`);
+          assert.deepEqual(await evaluate('[...document.querySelectorAll(".rebate-item-editor")].map(row => row.dataset.itemId)'), [itemId], 'selected original report must expose only the items shipped in this parcel');
+          assert.equal(await evaluate('document.querySelector("form[data-form=rebate]").elements.id.value'), reportId);
+          await checkLayout(`closed-multi-source-${reportId}`);
+          await click('.modal-heading [data-action="close-modal"]');
+        }
+        assert.deepEqual(await closedFinancials(), originalClosedFinancials, 'choosing sources must not mutate either closed shipment');
         assert.deepEqual(issues, [], issues.join('\n'));
       });
     }

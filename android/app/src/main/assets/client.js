@@ -1932,12 +1932,13 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       const settlementDetails = "".concat(settlementList).concat(shipmentStatusDetails(view));
       const settlementAction = view.closed ? '<button class="link-button" data-action="reopen-shipment" data-id="'.concat(esc(shipment.id), '">撤销结单</button>') : '<button class="link-button" data-action="close-shipment" data-id="'.concat(esc(shipment.id), '">结单</button>');
       const addSettlementAction = view.closed ? "" : '<button class="link-button" data-action="add-settlement" data-id="'.concat(esc(shipment.id), '">记返款</button>');
+      const rebateAction = '<button class="link-button" data-action="edit-shipment-rebate" data-id="'.concat(esc(shipment.id), '">调整返利</button>');
       const shipmentEditActions = view.closed ? "" : '<button class="link-button" data-action="edit-shipment" data-id="'.concat(esc(shipment.id), '">编辑</button><button class="link-button danger" data-action="void-shipment" data-id="').concat(esc(shipment.id), '">作废</button>');
-      return '<tr><td class="number">'.concat(esc(dateText(shipment.shippedAt)), "</td><td><strong>").concat(esc(shipment.trackingNumber), '</strong><div class="muted small">').concat(quantity, " 件</div></td><td>").concat(esc(view.items.map(shipmentItemLabel).join("、")), '</td><td class="money">').concat(money(view.actualPaymentCents), '</td><td class="money">').concat(money(shipment.shippingCostCents), '</td><td class="money">').concat(money(view.expectedRefundCents), "</td><td>").concat(rebateComparison(view.expectedRebateCents, view.actualRebateCents), '</td><td class="money">').concat(money(view.returnedCents)).concat(view.closed ? '<div class="muted small">最终金额</div>' : "", "</td><td>").concat(settlementDetails, '</td><td><div class="inline-actions"><button class="link-button" data-action="print-shipment" data-id="').concat(esc(shipment.id), '">打印单子</button>').concat(addSettlementAction).concat(settlementAction).concat(shipmentEditActions, "</div></td></tr>");
+      return '<tr><td class="number">'.concat(esc(dateText(shipment.shippedAt)), "</td><td><strong>").concat(esc(shipment.trackingNumber), '</strong><div class="muted small">').concat(quantity, " 件</div></td><td>").concat(esc(view.items.map(shipmentItemLabel).join("、")), '</td><td class="money">').concat(money(view.actualPaymentCents), '</td><td class="money">').concat(money(shipment.shippingCostCents), '</td><td class="money">').concat(money(view.expectedRefundCents), "</td><td>").concat(rebateComparison(view.expectedRebateCents, view.actualRebateCents), '</td><td class="money">').concat(money(view.returnedCents)).concat(view.closed ? '<div class="muted small">最终金额</div>' : "", "</td><td>").concat(settlementDetails, '</td><td><div class="inline-actions"><button class="link-button" data-action="print-shipment" data-id="').concat(esc(shipment.id), '">打印单子</button>').concat(rebateAction).concat(addSettlementAction).concat(settlementAction).concat(shipmentEditActions, "</div></td></tr>");
     }).join("");
   }
   function renderShipments() {
-    return "".concat(pageHeading("Fulfillment", "快递", "从剩余仓库按先进先出分配商品", primaryAction("new-shipment", "新增快递")), '\n      <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="shipments" value="').concat(esc(app.search), '" placeholder="搜索单号、商品、备注"></div><div class="toolbar-group"><span class="muted small">').concat(shipmentViews().length, ' 笔有效快递</span></div></div>\n      <section class="panel table-panel"><div class="table-wrap"><table class="mobile-table shipment-table"><thead><tr><th>发出时间</th><th>单号</th><th>快递内容</th><th>所含商品实际付款</th><th>快递价格</th><th>预计返款</th><th>返利</th><th>实际返款</th><th>状态</th><th>操作</th></tr></thead><tbody>').concat(shipmentRows(), "</tbody></table></div></section>");
+    return "".concat(pageHeading("Fulfillment", "快递", "已结单仍可调整实际返利，无需撤销结单", primaryAction("new-shipment", "新增快递")), '\n      <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="shipments" value="').concat(esc(app.search), '" placeholder="搜索单号、商品、备注"></div><div class="toolbar-group"><span class="muted small">').concat(shipmentViews().length, ' 笔有效快递</span></div></div>\n      <section class="panel table-panel"><div class="table-wrap"><table class="mobile-table shipment-table"><thead><tr><th>发出时间</th><th>单号</th><th>快递内容</th><th>所含商品实际付款</th><th>快递价格</th><th>预计返款</th><th>返利</th><th>实际返款</th><th>状态</th><th>操作</th></tr></thead><tbody>').concat(shipmentRows(), "</tbody></table></div></section>");
   }
   function renderInventory() {
     const lots = Domain.inventoryLots(app.state);
@@ -2116,7 +2117,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function reportEditor(reportId) {
     const report = reportId ? app.state.reports.find((row) => row.id === reportId) : null;
     const items = report ? reportItems(report.id) : [{ id: "", productName: "", note: "", quantity: 1, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 }];
-    openModal(report ? "编辑报单" : "新增报单", '<form data-form="report"><div class="form-grid"><div class="field"><label>报单时间</label><input class="input" name="occurredAt" type="datetime-local" required value="'.concat(esc(dateInputValue(report == null ? void 0 : report.occurredAt)), '"></div><div class="field"><label>商品总行数</label><input class="input" value="').concat(items.length, '" disabled></div><div class="field full"><label>原消息文本</label><textarea class="textarea" name="originalMessage" placeholder="粘贴原始报单消息">').concat(esc((report == null ? void 0 : report.originalMessage) || ""), '</textarea></div></div><div class="modal-section"><div class="modal-section-heading"><h3>商品明细</h3><button class="button button-small button-quiet" type="button" data-action="add-report-item">添加商品行</button></div><div class="table-wrap"><table class="editor-table"><thead><tr><th>物品名称</th><th>备注</th><th>数量</th><th>实际付款</th><th>预计返款</th><th>预计返利</th><th></th></tr></thead><tbody id="report-items-editor">').concat(items.map(reportItemEditorRow).join(""), '</tbody></table></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存报单</button></div><input type="hidden" name="id" value="').concat(esc((report == null ? void 0 : report.id) || ""), '"></form>'), true);
+    openModal(report ? "编辑报单" : "新增报单", '<form data-form="report">'.concat(report ? '<div class="info-box rebate-intro">这里的预计返利保留原始预估。要修改实际返利，请在报单或快递列表点击「调整返利」；即使已结单也可修改，无需撤销结单。</div>' : "", '<div class="form-grid"><div class="field"><label>报单时间</label><input class="input" name="occurredAt" type="datetime-local" required value="').concat(esc(dateInputValue(report == null ? void 0 : report.occurredAt)), '"></div><div class="field"><label>商品总行数</label><input class="input" value="').concat(items.length, '" disabled></div><div class="field full"><label>原消息文本</label><textarea class="textarea" name="originalMessage" placeholder="粘贴原始报单消息">').concat(esc((report == null ? void 0 : report.originalMessage) || ""), '</textarea></div></div><div class="modal-section"><div class="modal-section-heading"><h3>商品明细</h3><button class="button button-small button-quiet" type="button" data-action="add-report-item">添加商品行</button></div><div class="table-wrap"><table class="editor-table"><thead><tr><th>物品名称</th><th>备注</th><th>数量</th><th>实际付款</th><th>预计返款</th><th>预计返利</th><th></th></tr></thead><tbody id="report-items-editor">').concat(items.map(reportItemEditorRow).join(""), '</tbody></table></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存报单</button></div><input type="hidden" name="id" value="').concat(esc((report == null ? void 0 : report.id) || ""), '"></form>'), true);
   }
   function reportItemEditorRow(item) {
     return '<tr class="report-item-editor" data-item-id="'.concat(esc(item.id || ""), '"><td data-label="物品名称"><input class="input product-input" data-field="productName" value="').concat(esc(item.productName), '" placeholder="商品名称" required></td><td data-label="备注"><input class="input" data-field="note" value="').concat(esc(item.note || ""), '" placeholder="可选"></td><td data-label="数量"><input class="input" data-field="quantity" type="number" min="1" step="1" value="').concat(esc(item.quantity), '" required></td><td data-label="实际付款"><input class="input" data-field="actualPaymentCents" inputmode="decimal" value="').concat(esc(valueMoney(item.actualPaymentCents)), '" required></td><td data-label="预计返款"><input class="input" data-field="expectedRefundCents" inputmode="decimal" value="').concat(esc(valueMoney(item.expectedRefundCents)), '" required></td><td data-label="预计返利"><input class="input" data-field="expectedRebateCents" inputmode="decimal" value="').concat(esc(valueMoney(item.expectedRebateCents)), '" required></td><td data-label="操作"><button class="link-button danger" type="button" data-action="remove-report-item">移除</button></td></tr>');
@@ -2137,14 +2138,49 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function retainedRebate(item, amount = Domain.actualRebateForItem(item)) {
     return amount - Domain.amountForQuantity(amount, item.quantity, Domain.refundQuantity(app.state, item.id));
   }
-  function rebateEditor(reportId) {
+  function shipmentRebateEditor(shipmentId, reportId = "") {
+    const view = shipmentViews().find((row) => row.shipment.id === shipmentId);
+    if (!view) {
+      toast("快递不存在或已作废", true);
+      return;
+    }
+    const groups = /* @__PURE__ */ new Map();
+    for (const allocation of view.items) {
+      const item = Domain.itemById(app.state, allocation.reportItemId);
+      const report = item && Domain.reportById(app.state, item.reportId);
+      if (!report) {
+        toast("快递关联的报单不存在，无法调整返利", true);
+        return;
+      }
+      const group = groups.get(report.id) || { report, items: /* @__PURE__ */ new Map(), quantity: 0 };
+      group.items.set(item.id, item);
+      group.quantity += allocation.quantity;
+      groups.set(report.id, group);
+    }
+    const selected = reportId ? groups.get(reportId) : groups.size === 1 ? groups.values().next().value : null;
+    if (selected) {
+      rebateEditor(selected.report.id, { itemIds: [...selected.items.keys()], shipment: view });
+      return;
+    }
+    if (!groups.size || reportId) {
+      toast("该快递没有对应的可调整商品批次", true);
+      return;
+    }
+    openModal("选择返利所属报单", '<div class="shipment-rebate-picker"><div class="info-box rebate-intro">快递 '.concat(esc(view.shipment.trackingNumber), ' 涉及多笔报单，请选择要调整的商品批次。即使已结单也能修改实际返利，不改变结单状态和实际返款。填写的是原始整批金额，同批商品在其他快递中的返利分摊也会更新。</div><div class="rebate-items">').concat([...groups.values()].map((group) => '<section class="rebate-item-editor"><h3>'.concat(esc(dateText(group.report.occurredAt)), '</h3><p class="rebate-source-products">').concat(esc([...group.items.values()].map(productLabel).join("、")), '</p><div class="rebate-item-meta"><span>本快递 ').concat(group.quantity, " 件</span><span>").concat(group.items.size, ' 个商品批次</span></div><button class="button button-small" type="button" data-action="choose-shipment-rebate" data-id="').concat(esc(group.report.id), '" data-shipment-id="').concat(esc(shipmentId), '">调整该报单返利</button></section>')).join(""), '</div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">关闭</button></div></div>'), true);
+  }
+  function rebateEditor(reportId, options = {}) {
     const report = Domain.reportById(app.state, reportId);
     if (!report) {
       toast("报单不存在或已作废", true);
       return;
     }
-    const items = reportItems(reportId);
-    openModal("调整实际返利", '<form data-form="rebate"><div class="info-box rebate-intro" id="rebate-help">填写原始整批商品的总返利，不是单件或剩余商品金额。系统会按已退款数量自动扣除对应返利。默认按预计全额计入，也可自定义为 0；出库或快递结单后仍可调整，不改变商品付款和快递返款。</div><div class="rebate-items">'.concat(items.map((item, index) => {
+    const items = reportItems(reportId).filter((item) => !options.itemIds || options.itemIds.includes(item.id));
+    if (!items.length) {
+      toast("没有可调整返利的商品", true);
+      return;
+    }
+    const context = options.shipment ? '<p class="rebate-context">快递 '.concat(esc(options.shipment.shipment.trackingNumber)).concat(options.shipment.closed ? ' <span class="phrase">已结单，无需撤销结单</span>' : "", "</p>") : "";
+    openModal("调整实际返利", '<form data-form="rebate">'.concat(context, '<div class="info-box rebate-intro" id="rebate-help">填写原始整批商品的总返利，不是单件或本快递的分摊金额。系统会按已退款数量自动扣除对应返利，同批商品在其他快递中的分摊也会更新。默认按预计全额计入，也可自定义为 0；出库或快递结单后仍可调整，不改变商品付款和快递返款。</div><div class="rebate-items">').concat(items.map((item, index) => {
       const useExpected = item.actualRebateCents == null;
       const amount = Domain.actualRebateForItem(item);
       return '<section class="rebate-item-editor" data-item-id="'.concat(esc(item.id), '" aria-labelledby="rebate-title-').concat(index, '"><h3 id="rebate-title-').concat(index, '">').concat(esc(productLabel(item)), '</h3><div class="rebate-item-meta"><span>原数量 ').concat(item.quantity, " 件</span><span>已退款 ").concat(Domain.refundQuantity(app.state, item.id), " 件</span><span>整批预计 ").concat(money(item.expectedRebateCents), '</span></div><label class="rebate-default"><input type="checkbox" data-field="useExpected"').concat(useExpected ? " checked" : "", '><span>按预计全额（默认）</span></label><div class="field"><label for="rebate-amount-').concat(index, '">整批实际返利（元）</label><input class="input" id="rebate-amount-').concat(index, '" data-field="actualRebateCents" inputmode="decimal" value="').concat(esc(valueMoney(amount)), '" aria-describedby="rebate-help rebate-preview-').concat(index, '" required').concat(useExpected ? " disabled" : "", '></div><p class="rebate-preview" id="rebate-preview-').concat(index, '" data-rebate-preview>计入利润：').concat(money(retainedRebate(item, amount)), "（已扣除退款部分）</p></section>");
@@ -2458,6 +2494,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     } else if (action === "new-report") reportEditor();
     else if (action === "edit-report") reportEditor(target.dataset.id);
     else if (action === "edit-rebate") rebateEditor(target.dataset.id);
+    else if (action === "edit-shipment-rebate") shipmentRebateEditor(target.dataset.id);
+    else if (action === "choose-shipment-rebate") shipmentRebateEditor(target.dataset.shipmentId, target.dataset.id);
     else if (action === "void-report") {
       confirmAction("作废报单", "确定作废这笔报单吗？未使用的库存会一并退出。", () => dispatch("report.void", { id: target.dataset.id }));
     } else if (action === "new-shipment") shipmentEditor();
@@ -2470,7 +2508,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       const expected = (view == null ? void 0 : view.expectedRefundCents) || 0;
       const returned = (view == null ? void 0 : view.returnedCents) || 0;
       const detail = "预计返款 ".concat(money(expected), "，当前已登记 ").concat(money(returned), "（").concat(refundDifferenceText(returned - expected), "）。");
-      confirmAction("结单快递", "".concat(detail, "结单后不能继续编辑快递或返款；如需修改，请先撤销结单。实际返利仍可在报单中单独调整。"), () => dispatch("shipment.close", { id: target.dataset.id }));
+      confirmAction("结单快递", "".concat(detail, "结单后不能继续编辑快递或返款；如需修改，请先撤销结单。实际返利仍可直接点“调整返利”修改，无需撤销结单。"), () => dispatch("shipment.close", { id: target.dataset.id }));
     } else if (action === "reopen-shipment") {
       confirmAction("撤销结单", "撤销后可以继续登记或修改这笔快递的返款，是否继续？", () => dispatch("shipment.reopen", { id: target.dataset.id }));
     } else if (action === "add-settlement") settlementEditor(target.dataset.id);
@@ -2579,7 +2617,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   localStorageRead();
   render();
   if (window.OrderReportBoot) window.OrderReportBoot.ready();
-  if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register("sw.js?v=11").catch(() => {
+  if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register("sw.js?v=12").catch(() => {
   });
   sync();
   window.addEventListener("online", sync);
