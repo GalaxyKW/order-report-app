@@ -386,6 +386,109 @@ test('successful rebate sync keeps an explicit zero through authoritative downlo
   assert.equal(Domain.stats(harness.app.state).actualRebateCents, 0);
 });
 
+test('an offline inventory rename uploads successfully and survives authoritative download', async () => {
+  const original = applyOperations([reportOperation('inventory_success')]);
+  let authoritative = original;
+  const requests = [];
+  const harness = createHarness(async (url, options = {}) => {
+    requests.push({ url, method: options.method || 'GET' });
+    if (options.method !== 'POST') return jsonResponse(serverSnapshot({ state: authoritative, version: 2 }));
+    assert.equal(url, 'https://sync.example.test/api/sync/push');
+    const { operations } = JSON.parse(options.body);
+    assert.equal(operations.length, 1);
+    assert.equal(operations[0].type, 'inventory.rename');
+    assert.deepEqual(operations[0].payload, {
+      productName: 'product inventory_success', newName: '离线改名后的演示商品',
+      reportItemIds: ['item_inventory_success'],
+    });
+    authoritative = Domain.applyOperation(original, operations[0]).state;
+    return jsonResponse(serverSnapshot({
+      state: authoritative, version: 2,
+      accepted: [{ opId: operations[0].opId }], rejected: [], unprocessed: [],
+    }));
+  });
+  harness.app.state = original;
+  harness.app.settings = { apiBase: '', token: '' };
+  harness.dispatch('inventory.rename', {
+    productName: 'product inventory_success', newName: '离线改名后的演示商品',
+    reportItemIds: ['item_inventory_success'],
+  });
+  assert.equal(requests.length, 0, 'offline dispatch must only persist locally');
+  assert.equal(harness.app.queue.length, 1);
+  assert.equal(harness.stored().state.reportItems[0].productName, '离线改名后的演示商品');
+  assert.equal(harness.stored().queue[0].type, 'inventory.rename');
+
+  harness.saveSettings({ apiBase: 'https://sync.example.test', token: 'test-token' });
+  await harness.sync();
+  assert.equal(requests.length, 1);
+  assert.equal(harness.app.queue.length, 0);
+  assert.equal(harness.stored().queue.length, 0);
+  assert.equal(harness.app.state.reportItems[0].productName, '离线改名后的演示商品');
+  assert.equal(harness.app.state.reports[0].originalMessage, original.reports[0].originalMessage);
+  assert.deepEqual(Domain.stats(harness.app.state), Domain.stats(original));
+
+  await harness.pullServerState(false);
+  assert.equal(requests.length, 2);
+  assert.equal(harness.app.queue.length, 0);
+  assert.equal(harness.stored().state.reportItems[0].productName, '离线改名后的演示商品');
+  assert.equal(JSON.stringify(harness.app.state), JSON.stringify(authoritative));
+});
+
+test('an old server rejecting inventory rename preserves local names and blocks dependent operations across reload', async () => {
+  const create = reportOperation('inventory_old_server');
+  create.payload.items[0].quantity = 2;
+  const original = applyOperations([create]);
+  const requests = [];
+  const harness = createHarness(async (url, options = {}) => {
+    const { operations } = JSON.parse(options.body);
+    requests.push({ url, operations });
+    assert.deepEqual(operations.map((operation) => operation.type), ['inventory.rename', 'shipment.create']);
+    return jsonResponse(serverSnapshot({
+      state: original, version: 1, accepted: [],
+      rejected: [{ opId: operations[0].opId, error: '不支持的操作类型: inventory.rename' }],
+      unprocessed: [{ opId: operations[1].opId }],
+    }));
+  });
+  harness.app.state = original;
+  harness.app.settings = { apiBase: '', token: '' };
+  harness.dispatch('inventory.rename', {
+    productName: 'product inventory_old_server', newName: '待同步的演示新名称',
+    reportItemIds: ['item_inventory_old_server'],
+  });
+  harness.dispatch('shipment.create', {
+    shipment: { id: 'inventory_dependent_shipment', trackingNumber: 'DEMO-INVENTORY-SYNC', shippingCostCents: 0, shippedAt: '2026-10-16' },
+    items: [{ productName: '待同步的演示新名称', quantity: 1 }],
+  });
+  assert.equal(requests.length, 0);
+  assert.equal(harness.app.queue.length, 2);
+  const operationIds = harness.app.queue.map((operation) => operation.opId);
+  const localState = JSON.stringify(harness.app.state);
+  harness.saveSettings({ apiBase: 'https://sync.example.test', token: 'test-token' });
+  const response = await harness.pushPendingOperations();
+  assert.equal(response.rejected.size, 1);
+  assert.deepEqual(Array.from(response.unconfirmed), [operationIds[1]]);
+  assert.equal(requests.length, 1);
+  assert.equal(JSON.stringify(harness.app.state), localState, 'a rejected rename must not restore old server names or erase its local shipment');
+  assert.deepEqual(Array.from(harness.app.queue, (operation) => operation.opId), Array.from(operationIds));
+  assert.match(harness.app.queue[0].syncError, /不支持的操作类型: inventory\.rename/);
+  assert.equal(harness.app.queue[1].syncError, undefined);
+  assert.equal(harness.stored().state.reportItems[0].productName, '待同步的演示新名称');
+  assert.equal(harness.stored().queue.length, 2);
+
+  const blocked = await harness.pushPendingOperations();
+  assert.equal(blocked.blocked, true);
+  assert.equal(requests.length, 1, 'dependent shipment must not bypass its rejected rename');
+  const reloaded = createHarness(async (_url, options = {}) => {
+    assert.notEqual(options.method, 'POST', 'reload must not upload past the failed rename');
+    throw new Error('offline');
+  }, { storageMap: harness.storage });
+  if (reloaded.app.syncPromise) await reloaded.app.syncPromise;
+  assert.equal(JSON.stringify(reloaded.app.state), localState);
+  assert.deepEqual(Array.from(reloaded.app.queue, (operation) => operation.opId), Array.from(operationIds));
+  assert.match(reloaded.app.queue[0].syncError, /不支持的操作类型: inventory\.rename/);
+  assert.equal(reloaded.app.queue[1].syncError, undefined);
+});
+
 test('101 pending operations are uploaded in batches of 100 and 1', async () => {
   const operations = Array.from({ length: 101 }, (_, index) => ({
     opId: `op_batch_${index}`,

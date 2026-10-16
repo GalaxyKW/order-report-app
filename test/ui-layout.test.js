@@ -153,6 +153,13 @@ function previewStorage() {
   });
   apply('settlement.create', { settlement: { id: 'preview-multi-settlement', shipmentId: 'preview-multi-shipment', amountCents: 5100, settledAt: '2026-09-05' } });
   apply('shipment.close', { id: 'preview-multi-shipment' });
+  apply('report.create', {
+    report: { id: 'preview-duplicate-report', occurredAt: '2026-09-06T10:00', originalMessage: '同名合并与输入交互专用虚构报单' },
+    items: [
+      { id: 'preview-duplicate-item', productName: '尚未发货的示例便签', quantity: 3, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 },
+      { id: 'preview-usb-item', productName: 'USB 示例收纳袋', quantity: 3, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 },
+    ],
+  });
   assert.equal(Domain.isStateSnapshot(state), true);
   return { state, queue: [], settings: { apiBase: '', token: '' }, clientId: 'preview-client', localRevision: 0, storageRevision: 0, hasSynced: false };
 }
@@ -257,15 +264,16 @@ test('real packaged pages keep responsive navigation, actions and dialogs usable
       return result.result.value;
     };
     const click = async (selector) => {
-      const point = await evaluate(`(() => {
+      const point = await evaluate(`(async () => {
         const element = document.querySelector(${JSON.stringify(selector)});
         if (!element) throw new Error('Missing control: ' + ${JSON.stringify(selector)});
         element.scrollIntoView({block:'center', inline:'center'});
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const rect = element.getBoundingClientRect();
         const x = rect.left + rect.width / 2;
         const y = rect.top + rect.height / 2;
         const hit = document.elementFromPoint(x, y);
-        if (!hit || !element.contains(hit)) throw new Error('Control is obstructed: ' + ${JSON.stringify(selector)} + '; hit ' + (hit ? hit.outerHTML.slice(0, 300) : 'nothing'));
+        if (!hit || !element.contains(hit)) throw new Error('Control is obstructed: ' + ${JSON.stringify(selector)} + '; bounds ' + JSON.stringify({x,y,width:rect.width,height:rect.height}) + '; hit ' + (hit ? hit.outerHTML.slice(0, 300) : 'nothing'));
         return { x, y };
       })()`);
       await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
@@ -387,7 +395,7 @@ test('real packaged pages keep responsive navigation, actions and dialogs usable
         await checkProfit('10.00');
         await openRebate();
         assert.deepEqual(await rebateEditorState(), {
-          useExpected: false, disabled: false, value: '0.00', preview: '计入利润：¥0.00（已扣除退款部分）',
+          useExpected: false, disabled: false, value: '', preview: '计入利润：¥0.00（已扣除退款部分）',
         }, 'reopening must preserve an explicitly saved zero, not substitute the forecast');
         await checkLayout('rebate-zero-reopened');
         await click(defaultCheckbox);
@@ -424,7 +432,7 @@ test('real packaged pages keep responsive navigation, actions and dialogs usable
         assert.deepEqual(await closedFinancials(), originalClosedFinancials, 'saving zero from a closed shipment must not reopen it or rewrite the final return');
         await checkProfit('10.00');
         await openClosedShipmentRebate();
-        assert.equal((await rebateEditorState()).value, '0.00');
+        assert.equal((await rebateEditorState()).value, '');
         await fill(amountInput, '2.35');
         await checkLayout('closed-shipment-custom-rebate');
         await saveRebate();
@@ -456,6 +464,125 @@ test('real packaged pages keep responsive navigation, actions and dialogs usable
           await click('.modal-heading [data-action="close-modal"]');
         }
         assert.deepEqual(await closedFinancials(), originalClosedFinancials, 'choosing sources must not mutate either closed shipment');
+
+        // All following interactions use only the fictitious isolated profile.
+        // Real mouse/keyboard events catch blur-before-click, accidental form
+        // submissions, obscured steppers, and broken dependent previews.
+        await click('.nav-item[data-view="reports"] svg');
+        await click('[data-action="new-report"]');
+        const productInput = '.report-item-editor [data-field="productName"]';
+        const quantityInput = '.report-item-editor [data-field="quantity"]';
+        const increase = '.report-item-editor [data-action="step-quantity"][data-step="1"]';
+        const decrease = '.report-item-editor [data-action="step-quantity"][data-step="-1"]';
+        const getValue = (selector) => evaluate(`document.querySelector(${JSON.stringify(selector)}).value`);
+        assert.deepEqual(await evaluate(`[...document.querySelectorAll('form[data-form="report"] input[inputmode="decimal"]')].map(input => ({value:input.value, placeholder:input.placeholder, required:input.required}))`), [
+          { value: '', placeholder: '0.00', required: false },
+          { value: '', placeholder: '0.00', required: false },
+          { value: '', placeholder: '0.00', required: false },
+        ]);
+        await fill(productInput, '便签');
+        assert.equal(await evaluate(`document.querySelectorAll('.product-suggestions:not([hidden]) [data-action="choose-product-name"]').length`), 1, 'duplicate historic names must appear once');
+        await click(quantityInput);
+        await evaluate('new Promise(resolve => setTimeout(resolve, 20))');
+        assert.equal(await evaluate('document.querySelectorAll(".product-suggestions:not([hidden])").length'), 0, 'moving focus outside the product field must close history');
+        await fill(productInput, '便签');
+        await checkLayout('product-history-open');
+        await screenshot(`${width}-product-history`);
+        await click('.product-suggestions:not([hidden]) [data-action="choose-product-name"]');
+        assert.equal(await getValue(productInput), '尚未发货的示例便签', 'mouse selection must survive input blur');
+        assert.ok(await evaluate('!!document.querySelector("form[data-form=report]")'), 'choosing history must not submit the form');
+        await click(increase);
+        assert.equal(await getValue(quantityInput), '2');
+        await click(decrease);
+        await click(decrease);
+        assert.equal(await getValue(quantityInput), '1', 'quantity must stop at its minimum');
+        await fill(quantityInput, '4');
+        await click(increase);
+        assert.equal(await getValue(quantityInput), '5', 'manual typing and stepping must cooperate');
+        await fill(productInput, 'usb');
+        await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
+        await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
+        assert.equal(await evaluate(`(() => {
+          const input = document.querySelector(${JSON.stringify(productInput)});
+          const event = new KeyboardEvent('keydown', {key:'Enter', code:'Enter', isComposing:true, bubbles:true, cancelable:true});
+          return input.dispatchEvent(event);
+        })()`), true, 'IME confirmation must not be prevented or choose a historical name');
+        assert.equal(await getValue(productInput), 'usb');
+        assert.ok(await evaluate('!!document.querySelector("form[data-form=report]")'));
+        await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+        await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+        assert.equal(await getValue(productInput), 'USB 示例收纳袋');
+        assert.ok(await evaluate('!!document.querySelector("form[data-form=report]")'), 'Enter must choose history rather than save');
+        await click('[data-action="add-report-item"]');
+        assert.equal(await evaluate('document.querySelectorAll(".report-item-editor .quantity-control").length'), 2, 'new rows must include their quantity controls');
+        const secondProductInput = '.report-item-editor:nth-child(2) [data-field="productName"]';
+        await fill(secondProductInput, '便签');
+        await click('.product-suggestions:not([hidden]) [data-action="choose-product-name"]');
+        assert.equal(await getValue(secondProductInput), '尚未发货的示例便签');
+        assert.equal(await getValue(productInput), 'USB 示例收纳袋', 'history selection must affect only its own row');
+        await fill(secondProductInput, '不存在的名字');
+        assert.equal(await evaluate('document.querySelectorAll(".product-suggestions:not([hidden]) [data-action=choose-product-name]").length'), 0);
+        await fill(secondProductInput, '便签');
+        await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+        await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+        assert.equal(await evaluate('document.querySelectorAll(".product-suggestions:not([hidden])").length'), 0);
+        assert.ok(await evaluate('!!document.querySelector("form[data-form=report]")'), 'Escape should dismiss history before closing its editor');
+        await click('.report-item-editor:nth-child(2) [data-action="remove-report-item"]');
+        await fill(productInput, 'DEMO 新增零金额商品');
+        await checkLayout('quantity-controls');
+        await click('form[data-form="report"] button[type="submit"]');
+        assert.equal(await evaluate('!!document.querySelector(".modal")'), false, 'blank zero-amount inputs must pass native validation and save');
+        const savedZero = await evaluate(`(() => {
+          const state = JSON.parse(localStorage.getItem('order-report-local-v1')).state;
+          const item = state.reportItems.find(row => row.productName === 'DEMO 新增零金额商品');
+          return item && {quantity:item.quantity, actualPaymentCents:item.actualPaymentCents, expectedRefundCents:item.expectedRefundCents, expectedRebateCents:item.expectedRebateCents};
+        })()`);
+        assert.deepEqual(savedZero, { quantity: 5, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 });
+
+        await click('.nav-item[data-view="shipments"] svg');
+        await click('[data-action="new-shipment"]');
+        await evaluate(`(() => {
+          const input = document.querySelector('.shipment-item-editor [data-field="productName"]');
+          input.value = '尚未发货的示例便签';
+          input.dispatchEvent(new Event('change', {bubbles:true}));
+        })()`);
+        const initialShipmentPreview = await evaluate('document.querySelector("#shipment-financial-preview").textContent');
+        await click('.shipment-item-editor [data-action="step-quantity"][data-step="1"]');
+        assert.equal(await getValue('.shipment-item-editor [data-field="quantity"]'), '2');
+        assert.notEqual(await evaluate('document.querySelector("#shipment-financial-preview").textContent'), initialShipmentPreview, 'quantity clicks must refresh shipment financial totals');
+        await checkLayout('shipment-quantity-stepper');
+        await click('.modal-heading [data-action="close-modal"]');
+        await click('.nav-item[data-view="inventory"] svg');
+        await click('.inventory-group[data-product-name="尚未发货的示例便签"] details summary');
+        await click('[data-action="new-refund"][data-id="preview-unrelated-item"]');
+        const initialRefundAmount = await getValue('form[data-form="refund"] [name="amount"]');
+        await click('form[data-form="refund"] [data-action="step-quantity"][data-step="1"]');
+        assert.equal(await getValue('form[data-form="refund"] [name="quantity"]'), '2');
+        assert.notEqual(await getValue('form[data-form="refund"] [name="amount"]'), initialRefundAmount, 'quantity clicks must recompute the read-only refund amount');
+        await click('form[data-form="refund"] [data-action="step-quantity"][data-step="1"]');
+        assert.equal(await getValue('form[data-form="refund"] [name="quantity"]'), '2', 'refund stepping must respect currently refundable stock');
+        await checkLayout('refund-quantity-stepper');
+        await click('.modal-heading [data-action="close-modal"]');
+
+        const inventoryGroup = '.inventory-group[data-product-name="尚未发货的示例便签"]';
+        assert.equal(await evaluate(`document.querySelectorAll(${JSON.stringify(inventoryGroup)}).length`), 1, 'same-named inventory must share one product group');
+        await click('[data-action="rename-inventory"][data-product-name="尚未发货的示例便签"]');
+        assert.ok(await evaluate('!!document.querySelector("form[data-form=inventory-rename]")'));
+        await fill('form[data-form="inventory-rename"] [name="newName"]', 'USB 示例收纳袋');
+        await checkLayout('inventory-rename');
+        await screenshot(`${width}-inventory-rename`);
+        await click('form[data-form="inventory-rename"] button[type="submit"]');
+        // A merge confirmation may intentionally intervene before dispatch.
+        if (await evaluate('!!document.querySelector("[data-action=confirm-action]")')) await click('[data-action="confirm-action"]');
+        assert.equal(await evaluate('!!document.querySelector(".modal")'), false, `renaming inventory must finish cleanly: ${await evaluate('JSON.stringify({modal:document.querySelector(".modal")?.textContent, toasts:[...document.querySelectorAll(".toast")].map(node=>node.textContent)})')}`);
+        const renamed = await evaluate(`(() => {
+          const stored = JSON.parse(localStorage.getItem('order-report-local-v1'));
+          return { names:stored.state.reportItems.filter(item => ['preview-unrelated-item','preview-duplicate-item'].includes(item.id)).map(item => item.productName), op:stored.queue[stored.queue.length-1].type };
+        })()`);
+        assert.deepEqual(renamed, { names: ['USB 示例收纳袋', 'USB 示例收纳袋'], op: 'inventory.rename' });
+        assert.equal(await evaluate('document.querySelectorAll(".inventory-group[data-product-name=\\"USB 示例收纳袋\\"]").length'), 1, 'renaming to an existing product must merge its visual inventory group');
+        assert.equal(await evaluate(`document.querySelectorAll(${JSON.stringify(inventoryGroup)}).length`), 0);
+        await checkLayout('inventory-merged');
         assert.deepEqual(issues, [], issues.join('\n'));
       });
     }

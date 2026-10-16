@@ -421,6 +421,37 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }
     return [...byProduct.values()].sort((a, b) => a.productName.localeCompare(b.productName));
   }
+  function renameInventory(state, payload, now) {
+    if (typeof payload.productName !== "string" || typeof payload.newName !== "string") {
+      throw new Error("原商品名称和新商品名称必须是文字");
+    }
+    const productName = text(payload.productName, "原商品名称");
+    const newName = text(payload.newName, "新商品名称");
+    if (!Array.isArray(payload.reportItemIds) || !payload.reportItemIds.length) {
+      throw new Error("至少选择一个在库商品批次修改名称");
+    }
+    const availableIds = new Set(inventoryLots(state).map((lot) => lot.reportItemId));
+    const seen = /* @__PURE__ */ new Set();
+    const updates = payload.reportItemIds.map((id) => {
+      if (typeof id !== "string" || !id.trim()) throw new Error("库存商品批次编号无效");
+      if (seen.has(id)) throw new Error("库存商品批次编号不能重复");
+      seen.add(id);
+      const item = itemById(state, id);
+      if (!item || !reportById(state, item.reportId)) throw new Error("库存商品或对应报单不存在、已作废");
+      if (item.productName !== productName) throw new Error("商品名称已变化，请刷新库存后重新修改");
+      if (!availableIds.has(id)) throw new Error("所选商品批次已无库存，请刷新库存后重新修改");
+      return item;
+    });
+    const reportIds = [...new Set(updates.map((item) => item.reportId))];
+    if (newName !== productName) {
+      for (const item of updates) {
+        item.productName = newName;
+        item.updatedAt = now;
+      }
+      for (const id of reportIds) reportById(state, id).updatedAt = now;
+    }
+    return { state, result: { productName, newName, itemIds: updates.map((item) => item.id), reportIds } };
+  }
   function allocateFifo(state, requestedLines, options = {}) {
     const requested = Array.isArray(requestedLines) ? requestedLines : [];
     if (!requested.length) throw new Error("至少添加一项快递商品");
@@ -787,6 +818,9 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       case "report.void":
         applied = voidReport(state, operation.payload || {}, now);
         break;
+      case "inventory.rename":
+        applied = renameInventory(state, operation.payload || {}, now);
+        break;
       case "shipment.create":
         applied = addShipment(state, operation.payload || {}, now, idFactory);
         break;
@@ -1029,6 +1063,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     exportFilename: ""
   };
   let lastPersistedRaw = null;
+  let productInputSequence = 0;
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const UI_ICONS = {
@@ -1087,11 +1122,71 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function valueMoney(cents) {
     return Domain.formatMoney(cents);
   }
+  function editableMoneyValue(cents) {
+    return Number(cents || 0) === 0 ? "" : valueMoney(cents);
+  }
   function parseMoneyInput(value, label) {
-    return Domain.parseMoney(value || "0", label);
+    return Domain.parseMoney(String(value != null ? value : "").trim() || "0", label);
   }
   function normalizeApiBase(value) {
     return String(value || "").trim().replace(/\/+$/, "");
+  }
+  function quantityInput(value, attributes, label = "数量") {
+    return '<div class="quantity-control"><input class="input" '.concat(attributes, ' type="number" inputmode="numeric" min="1" max="').concat(Number.MAX_SAFE_INTEGER, '" step="1" value="').concat(esc(value != null ? value : 1), '" aria-label="').concat(esc(label), '" required><div class="quantity-buttons"><button type="button" data-action="step-quantity" data-step="1" aria-label="增加').concat(esc(label), '" title="增加数量">▲</button><button type="button" data-action="step-quantity" data-step="-1" aria-label="减少').concat(esc(label), '" title="减少数量">▼</button></div></div>');
+  }
+  function stepQuantity(target) {
+    const input = $("input", target.closest(".quantity-control"));
+    if (!input || input.disabled || input.readOnly) return;
+    const minimum = Number(input.min || 1);
+    const maximum = Math.min(Number(input.max || Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
+    if (!["1", "-1"].includes(target.dataset.step)) return;
+    const direction = Number(target.dataset.step);
+    const current = Number(input.value);
+    const valid = input.value.trim() && Number.isSafeInteger(current) && current >= minimum;
+    if (direction > 0 && (maximum < minimum || valid && current >= maximum)) return;
+    const next = valid ? current + direction : minimum;
+    const nextValue = String(Math.max(minimum, direction > 0 ? Math.min(maximum, next) : next));
+    if (input.value === nextValue) return;
+    input.value = nextValue;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  function historicalProductNames(query = "") {
+    const reports = new Set(app.state.reports.filter(Domain.isActive).map((report) => report.id));
+    const names = [...new Set(app.state.reportItems.filter((item) => Domain.isActive(item) && reports.has(item.reportId)).map((item) => item.productName))];
+    const tokens = String(query).trim().toLowerCase().split(/\s+/).filter(Boolean);
+    return names.filter((name) => tokens.every((token) => name.toLowerCase().includes(token))).sort((a, b) => {
+      const prefix = String(query).trim().toLowerCase();
+      return Number(b.toLowerCase().startsWith(prefix)) - Number(a.toLowerCase().startsWith(prefix)) || a.localeCompare(b);
+    }).slice(0, 8);
+  }
+  function productNameInput(value, attributes = "") {
+    const listId = "product-suggestions-".concat(++productInputSequence);
+    return '<div class="product-name-field"><input class="input product-input" '.concat(attributes, ' data-product-history value="').concat(esc(value || ""), '" placeholder="商品名称" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="').concat(listId, '" required><div class="product-suggestions" id="').concat(listId, '" role="listbox" aria-label="历史商品名称" hidden></div></div>');
+  }
+  function closeProductSuggestions(input) {
+    const list = $(".product-suggestions", input.closest(".product-name-field"));
+    if (!list) return;
+    list.hidden = true;
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    delete input.dataset.suggestionIndex;
+  }
+  function updateProductSuggestions(input) {
+    const list = $(".product-suggestions", input.closest(".product-name-field"));
+    const names = historicalProductNames(input.value);
+    list.innerHTML = names.map((name, index) => '<button type="button" role="option" aria-selected="false" tabindex="-1" id="'.concat(list.id, "-").concat(index, '" data-action="choose-product-name" data-product-name="').concat(esc(name), '">').concat(esc(name), "</button>")).join("");
+    list.hidden = !names.length;
+    input.setAttribute("aria-expanded", String(Boolean(names.length)));
+    input.removeAttribute("aria-activedescendant");
+    delete input.dataset.suggestionIndex;
+  }
+  function chooseProductName(target) {
+    const input = $("[data-product-history]", target.closest(".product-name-field"));
+    input.value = target.dataset.productName;
+    input.focus();
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    closeProductSuggestions(input);
   }
   function isNonEmptyString(value) {
     return typeof value === "string" && Boolean(value.trim());
@@ -1401,7 +1496,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     } else if (failed) {
       setSyncStatus("error", "失败 · ".concat(failed));
     } else if (app.syncError) {
-      setSyncStatus("error", pending ? "离线 · ".concat(pending) : "离线");
+      setSyncStatus("error", pending ? "同步异常 · ".concat(pending) : "同步异常");
     } else if (pending) {
       setSyncStatus("syncing", "待上传 · ".concat(pending));
     } else {
@@ -1756,7 +1851,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
         render();
       } catch (error) {
         app.syncError = error.message;
-        setSyncStatus("error", "离线保存");
+        setSyncStatus("error", "已存本机 · 同步异常");
         render();
       }
     });
@@ -1945,7 +2040,21 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const aggregate = Domain.aggregateInventory(app.state);
     const availableQuantity = lots.reduce((sum, lot) => sum + lot.availableQuantity, 0);
     const availableValue = lots.reduce((sum, lot) => sum + lot.availableActualPaymentCents, 0);
-    return "".concat(pageHeading("Inventory", "仓库", "当前未发快递、未退款的商品批次", primaryAction("new-refund", "登记退款", "refunds")), '\n      <section class="stock-summary"><div class="panel"><div class="muted small">可用商品种类</div><div class="summary-value">').concat(aggregate.length, '</div></div><div class="panel"><div class="muted small">可用商品数量</div><div class="summary-value number">').concat(availableQuantity, '</div></div><div class="panel"><div class="muted small">可用商品成本</div><div class="summary-value money">').concat(money(availableValue), '</div></div></section>\n      <section class="panel table-panel"><div class="panel-heading"><h2>库存批次</h2><span class="muted small">按报单时间排序</span></div><div class="table-wrap"><table class="mobile-table inventory-table"><thead><tr><th>商品</th><th>报单时间</th><th>批次数量</th><th>剩余</th><th>剩余成本</th><th>剩余预计收益</th><th>操作</th></tr></thead><tbody>').concat(lots.length ? lots.map((lot) => "<tr><td><strong>".concat(esc(lot.productName), "</strong></td><td>").concat(esc(dateText(lot.sourceDate)), '</td><td class="number">').concat(lot.quantity, '</td><td class="number"><span class="tag tag-green">').concat(lot.availableQuantity, '</span></td><td class="money">').concat(money(lot.availableActualPaymentCents), '</td><td><span class="money">').concat(money(lot.availableExpectedRefundCents + lot.availableExpectedRebateCents), '</span><div class="muted small">剩余实际返利 <span class="money">').concat(money(lot.availableActualRebateCents), '</span></div></td><td><button class="link-button" data-action="new-refund" data-id="').concat(esc(lot.reportItemId), '">退款</button></td></tr>')).join("") : '<tr><td colspan="7">'.concat(emptyState("仓库为空", "新增报单后，可发货或退款的商品会出现在这里。", primaryAction("new-report", "新增报单"), "inventory"), "</td></tr>"), "</tbody></table></div></section>");
+    return "".concat(pageHeading("Inventory", "仓库", "同名商品自动汇总，原始批次与先进先出规则保留", primaryAction("new-refund", "登记退款", "refunds")), '\n      <section class="stock-summary"><div class="panel"><div class="muted small">可用商品种类</div><div class="summary-value">').concat(aggregate.length, '</div></div><div class="panel"><div class="muted small">可用商品数量</div><div class="summary-value number">').concat(availableQuantity, '</div></div><div class="panel"><div class="muted small">可用商品成本</div><div class="summary-value money">').concat(money(availableValue), '</div></div></section>\n      <section class="inventory-groups">').concat(aggregate.length ? aggregate.map((product) => {
+      const totals = product.lots.reduce((sum, lot) => ({ cost: sum.cost + lot.availableActualPaymentCents, expected: sum.expected + lot.availableExpectedRefundCents + lot.availableExpectedRebateCents, rebate: sum.rebate + lot.availableActualRebateCents }), { cost: 0, expected: 0, rebate: 0 });
+      return '<article class="panel inventory-group" data-product-name="'.concat(esc(product.productName), '"><div class="inventory-group-heading"><div><h2>').concat(esc(product.productName), '</h2><p class="muted small">').concat(product.lots.length, ' 个来源批次 · 同名已合并显示</p></div><span class="tag tag-green">库存 ').concat(product.availableQuantity, ' 件</span></div><div class="inventory-group-metrics"><div><span>剩余成本</span><strong class="money">').concat(money(totals.cost), '</strong></div><div><span>剩余预计收益</span><strong class="money">').concat(money(totals.expected), '</strong></div><div><span>剩余实际返利</span><strong class="money">').concat(money(totals.rebate), '</strong></div></div><div class="inventory-group-actions"><button class="button button-small button-quiet" type="button" data-action="rename-inventory" data-product-name="').concat(esc(product.productName), '">修改商品名</button></div><details class="inventory-lots"><summary>查看 ').concat(product.lots.length, ' 个批次 / 登记退款</summary><div class="table-wrap"><table class="mobile-table inventory-table"><thead><tr><th>商品</th><th>报单时间</th><th>批次数量</th><th>剩余</th><th>剩余成本</th><th>剩余预计收益</th><th>操作</th></tr></thead><tbody>').concat(product.lots.map((lot) => "<tr><td><strong>".concat(esc(lot.productName), "</strong>").concat(lot.note ? '<div class="muted small">'.concat(esc(lot.note), "</div>") : "", "</td><td>").concat(esc(dateText(lot.sourceDate)), '</td><td class="number">').concat(lot.quantity, '</td><td class="number"><span class="tag tag-green">').concat(lot.availableQuantity, '</span></td><td class="money">').concat(money(lot.availableActualPaymentCents), '</td><td><span class="money">').concat(money(lot.availableExpectedRefundCents + lot.availableExpectedRebateCents), '</span><div class="muted small">剩余实际返利 <span class="money">').concat(money(lot.availableActualRebateCents), '</span></div></td><td><button class="link-button" data-action="new-refund" data-id="').concat(esc(lot.reportItemId), '">退款</button></td></tr>')).join(""), "</tbody></table></div></details></article>");
+    }).join("") : '<div class="panel">'.concat(emptyState("仓库为空", "新增报单后，可发货或退款的商品会出现在这里。", primaryAction("new-report", "新增报单"), "inventory"), "</div>"), "</section>");
+  }
+  function inventoryRenameEditor(productName) {
+    const product = Domain.aggregateInventory(app.state).find((row) => row.productName === productName);
+    if (!product) {
+      toast("该商品已无可用库存，请刷新后重试", true);
+      return;
+    }
+    openModal("修改仓库商品名", '<form data-form="inventory-rename"><div class="info-box rebate-intro">将同步修改当前 '.concat(product.lots.length, ' 个在库批次对应的报单商品名；这些批次关联的快递和退款也会显示新名称。只改名称，不改数量、金额、结单状态或原消息。已无库存的历史批次不变。</div><div class="field"><label>新的商品名称</label>').concat(productNameInput(productName, 'name="newName" aria-label="新的商品名称"'), '</div><p class="field-help">改成仓库中已有的名称，会自动合并显示；原始批次仍单独保留。</p><input type="hidden" name="productName" value="').concat(esc(productName), '"><input type="hidden" name="reportItemIds" value="').concat(esc(JSON.stringify(product.lots.map((lot) => lot.reportItemId))), '"><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存并同步改名</button></div></form>'));
+  }
+  function collectInventoryRenameForm(form) {
+    return { productName: form.elements.productName.value, newName: form.elements.newName.value.trim(), reportItemIds: JSON.parse(form.elements.reportItemIds.value) };
   }
   function refundRows() {
     const rows = app.state.refunds.filter(Domain.isActive).sort((a, b) => String(b.refundedAt).localeCompare(String(a.refundedAt)));
@@ -1962,6 +2071,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function operationLabel(type) {
     return {
       "report.create": "新增报单",
+      "inventory.rename": "仓库商品改名",
       "report.update": "编辑报单",
       "report.rebate.update": "调整实际返利",
       "report.void": "作废报单",
@@ -2079,9 +2189,10 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const connection = connectionStatus();
     const failedOperations = app.queue.filter((operation) => operation.syncError);
     const rebateUpgradeWarning = failedOperations.some((operation) => operation.type === "report.rebate.update" && /不支持的操作类型|unsupported operation/i.test(operation.syncError)) ? '<div class="warning-box rebate-upgrade-warning">服务器版本尚不支持实际返利。本机修改和操作队列已保留，后续操作会暂停上传；请先升级服务器，再点击该条“换新编号重试”。不要通过下载覆盖来处理，否则会丢掉未上传的调整。</div>' : "";
+    const inventoryUpgradeWarning = failedOperations.some((operation) => operation.type === "inventory.rename" && /不支持的操作类型|unsupported operation/i.test(operation.syncError)) ? '<div class="warning-box inventory-upgrade-warning">服务器版本尚不支持仓库商品改名。本机修改和操作队列已保留；请先升级并重启服务器，再点击该条“换新编号重试”。不要通过下载覆盖来处理。</div>' : "";
     const recoveryCount = currentRecoveryRaws().length;
     const legacyBindingAction = app.hasSynced && !app.lastServerId && pending ? '<div class="warning-box">这是旧版本留下的已同步数据和待上传队列，缺少服务器身份记录。普通同步已暂停；请核对地址后人工确认绑定，队列才会上传。</div><div class="backup-actions"><button class="button" type="button" data-action="sync-bind-upload">绑定当前服务器并上传</button></div>' : "";
-    return "".concat(pageHeading("Configuration", "设置", "服务器同步和本机数据", "")).concat(rebateUpgradeWarning, '\n      <section class="settings-stack">\n        <article class="panel"><div class="panel-heading"><h2>同步连接</h2><span class="status-pill ').concat(connection.kind, '">').concat(connection.label, '</span></div><div class="panel-body padded"><form data-form="settings"><div class="form-grid"><div class="field full"><label for="api-base">服务器地址</label><input class="input" id="api-base" name="apiBase" value="').concat(esc(app.settings.apiBase), '" placeholder="https://order.example.com"><div class="field-help">填写 HTTPS 反向代理地址，例如 https://order.example.com。</div></div><div class="field full"><label for="sync-token">同步令牌</label><input class="input" id="sync-token" name="token" type="password" value="').concat(esc(app.settings.token), '" autocomplete="off" placeholder="从服务器 runtime/sync-token 读取"><div class="field-help">令牌只保存于本机 WebView，不会写入业务 Git 仓库。</div></div></div><div class="sync-actions"><button class="button" type="submit">保存连接</button><button class="button button-quiet" type="button" data-action="sync-test">测试当前输入</button><button class="button button-quiet" type="button" data-action="sync-upload">上传待处理</button><button class="button button-quiet" type="button" data-action="sync-download">下载并覆盖</button></div><p class="field-help sync-action-help"><span class="phrase">测试只使用当前输入且不会保存；</span><span class="phrase">上传和下载只使用已保存的连接。</span><span class="phrase">下载会以服务器数据覆盖本机。</span></p></form></div></article>\n        <article class="panel"><div class="panel-heading"><h2>同步状态</h2><span class="muted small">').concat(queueSummary(), '</span></div><div class="panel-body padded"><div class="sync-counts"><div><span>待上传操作</span><strong>').concat(pending, "</strong></div><div><span>失败待处理</span><strong>").concat(failed, "</strong></div></div>").concat(legacyBindingAction).concat(app.syncError ? '<div class="danger-box">'.concat(esc(app.syncError), "</div>") : '<div class="info-box">待上传数量只代表尚未送到服务器的本地操作，不代表本机业务数据条数。成功同步后为 0 是正常状态。</div>').concat(recoveryCount ? '<div class="warning-box">已完整保留 '.concat(recoveryCount, ' 份原始本地恢复副本。请先全部导出，再决定是否下载覆盖。</div><div class="backup-actions"><button class="button button-quiet" data-action="export-recovery">导出 ').concat(recoveryCount, " 份原始恢复数据</button></div>") : "").concat(failedOperations.length ? '<div class="failed-operation-list">'.concat(failedOperations.map((operation) => '<div class="failed-operation"><div><strong>'.concat(esc(operationLabel(operation.type)), "</strong><span>").concat(esc(dateText(operation.createdAt)), "</span></div><p>").concat(esc(operation.syncError), '</p><div class="inline-actions"><button class="link-button" data-action="retry-failed" data-id="').concat(esc(operation.opId), '">换新编号重试</button><button class="link-button danger" data-action="discard-failed" data-id="').concat(esc(operation.opId), '">安全丢弃此条</button></div></div>')).join(""), '</div><div class="warning-box">失败操作不会自动重复提交。重试会生成新的操作编号；安全丢弃会先从已绑定服务器拉取权威状态，再重放其余队列。离线、服务器不符或任一重放失败时不会更改本机数据。</div>') : "", '</div></article>\n        <article class="panel"><div class="panel-heading"><h2>数据备份</h2></div><div class="panel-body padded"><div class="backup-actions"><button class="button button-quiet" data-action="export-local">导出本机数据</button><button class="button button-quiet" data-action="export-server">导出服务器数据</button></div><p class="field-help" style="margin-top:12px">导出内容可能包含完整业务数据。手机端会打开系统保存位置，也可以复制 JSON 内容。</p></div></article>\n      </section>');
+    return "".concat(pageHeading("Configuration", "设置", "服务器同步和本机数据", "")).concat(rebateUpgradeWarning).concat(inventoryUpgradeWarning, '\n      <section class="settings-stack">\n        <article class="panel"><div class="panel-heading"><h2>同步连接</h2><span class="status-pill ').concat(connection.kind, '">').concat(connection.label, '</span></div><div class="panel-body padded"><form data-form="settings"><div class="form-grid"><div class="field full"><label for="api-base">服务器地址</label><input class="input" id="api-base" name="apiBase" value="').concat(esc(app.settings.apiBase), '" placeholder="https://order.example.com"><div class="field-help">填写 HTTPS 反向代理地址，例如 https://order.example.com。</div></div><div class="field full"><label for="sync-token">同步令牌</label><input class="input" id="sync-token" name="token" type="password" value="').concat(esc(app.settings.token), '" autocomplete="off" placeholder="从服务器 runtime/sync-token 读取"><div class="field-help">令牌只保存于本机 WebView，不会写入业务 Git 仓库。</div></div></div><div class="sync-actions"><button class="button" type="submit">保存连接</button><button class="button button-quiet" type="button" data-action="sync-test">测试当前输入</button><button class="button button-quiet" type="button" data-action="sync-upload">上传待处理</button><button class="button button-quiet" type="button" data-action="sync-download">下载并覆盖</button></div><p class="field-help sync-action-help"><span class="phrase">测试只使用当前输入且不会保存；</span><span class="phrase">上传和下载只使用已保存的连接。</span><span class="phrase">下载会以服务器数据覆盖本机。</span></p></form></div></article>\n        <article class="panel"><div class="panel-heading"><h2>同步状态</h2><span class="muted small">').concat(queueSummary(), '</span></div><div class="panel-body padded"><div class="sync-counts"><div><span>待上传操作</span><strong>').concat(pending, "</strong></div><div><span>失败待处理</span><strong>").concat(failed, "</strong></div></div>").concat(legacyBindingAction).concat(app.syncError ? '<div class="danger-box">'.concat(esc(app.syncError), "</div>") : '<div class="info-box">待上传数量只代表尚未送到服务器的本地操作，不代表本机业务数据条数。成功同步后为 0 是正常状态。</div>').concat(recoveryCount ? '<div class="warning-box">已完整保留 '.concat(recoveryCount, ' 份原始本地恢复副本。请先全部导出，再决定是否下载覆盖。</div><div class="backup-actions"><button class="button button-quiet" data-action="export-recovery">导出 ').concat(recoveryCount, " 份原始恢复数据</button></div>") : "").concat(failedOperations.length ? '<div class="failed-operation-list">'.concat(failedOperations.map((operation) => '<div class="failed-operation"><div><strong>'.concat(esc(operationLabel(operation.type)), "</strong><span>").concat(esc(dateText(operation.createdAt)), "</span></div><p>").concat(esc(operation.syncError), '</p><div class="inline-actions"><button class="link-button" data-action="retry-failed" data-id="').concat(esc(operation.opId), '">换新编号重试</button><button class="link-button danger" data-action="discard-failed" data-id="').concat(esc(operation.opId), '">安全丢弃此条</button></div></div>')).join(""), '</div><div class="warning-box">失败操作不会自动重复提交。重试会生成新的操作编号；安全丢弃会先从已绑定服务器拉取权威状态，再重放其余队列。离线、服务器不符或任一重放失败时不会更改本机数据。</div>') : "", '</div></article>\n        <article class="panel"><div class="panel-heading"><h2>数据备份</h2></div><div class="panel-body padded"><div class="backup-actions"><button class="button button-quiet" data-action="export-local">导出本机数据</button><button class="button button-quiet" data-action="export-server">导出服务器数据</button></div><p class="field-help" style="margin-top:12px">导出内容可能包含完整业务数据。手机端会打开系统保存位置，也可以复制 JSON 内容。</p></div></article>\n      </section>');
   }
   function render(options = {}) {
     let settingsDraft = null;
@@ -2117,10 +2228,10 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function reportEditor(reportId) {
     const report = reportId ? app.state.reports.find((row) => row.id === reportId) : null;
     const items = report ? reportItems(report.id) : [{ id: "", productName: "", note: "", quantity: 1, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 }];
-    openModal(report ? "编辑报单" : "新增报单", '<form data-form="report">'.concat(report ? '<div class="info-box rebate-intro">这里的预计返利保留原始预估。要修改实际返利，请在报单或快递列表点击「调整返利」；即使已结单也可修改，无需撤销结单。</div>' : "", '<div class="form-grid"><div class="field"><label>报单时间</label><input class="input" name="occurredAt" type="datetime-local" required value="').concat(esc(dateInputValue(report == null ? void 0 : report.occurredAt)), '"></div><div class="field"><label>商品总行数</label><input class="input" value="').concat(items.length, '" disabled></div><div class="field full"><label>原消息文本</label><textarea class="textarea" name="originalMessage" placeholder="粘贴原始报单消息">').concat(esc((report == null ? void 0 : report.originalMessage) || ""), '</textarea></div></div><div class="modal-section"><div class="modal-section-heading"><h3>商品明细</h3><button class="button button-small button-quiet" type="button" data-action="add-report-item">添加商品行</button></div><div class="table-wrap"><table class="editor-table"><thead><tr><th>物品名称</th><th>备注</th><th>数量</th><th>实际付款</th><th>预计返款</th><th>预计返利</th><th></th></tr></thead><tbody id="report-items-editor">').concat(items.map(reportItemEditorRow).join(""), '</tbody></table></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存报单</button></div><input type="hidden" name="id" value="').concat(esc((report == null ? void 0 : report.id) || ""), '"></form>'), true);
+    openModal(report ? "编辑报单" : "新增报单", '<form data-form="report">'.concat(report ? '<div class="info-box rebate-intro">这里的预计返利保留原始预估。要修改实际返利，请在报单或快递列表点击「调整返利」；即使已结单也可修改，无需撤销结单。</div>' : "", '<div class="form-grid"><div class="field"><label>报单时间</label><input class="input" name="occurredAt" type="datetime-local" required value="').concat(esc(dateInputValue(report == null ? void 0 : report.occurredAt)), '"></div><div class="field"><label>商品总行数</label><input class="input" value="').concat(items.length, '" disabled></div><div class="field full"><label>原消息文本</label><textarea class="textarea" name="originalMessage" placeholder="粘贴原始报单消息">').concat(esc((report == null ? void 0 : report.originalMessage) || ""), '</textarea></div></div><div class="modal-section"><div class="modal-section-heading"><h3>商品明细</h3><span class="muted small">金额留空按 0.00 计</span><button class="button button-small button-quiet" type="button" data-action="add-report-item">添加商品行</button></div><div class="table-wrap"><table class="editor-table"><thead><tr><th>物品名称</th><th>备注</th><th>数量</th><th>实际付款</th><th>预计返款</th><th>预计返利</th><th></th></tr></thead><tbody id="report-items-editor">').concat(items.map(reportItemEditorRow).join(""), '</tbody></table></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存报单</button></div><input type="hidden" name="id" value="').concat(esc((report == null ? void 0 : report.id) || ""), '"></form>'), true);
   }
   function reportItemEditorRow(item) {
-    return '<tr class="report-item-editor" data-item-id="'.concat(esc(item.id || ""), '"><td data-label="物品名称"><input class="input product-input" data-field="productName" value="').concat(esc(item.productName), '" placeholder="商品名称" required></td><td data-label="备注"><input class="input" data-field="note" value="').concat(esc(item.note || ""), '" placeholder="可选"></td><td data-label="数量"><input class="input" data-field="quantity" type="number" min="1" step="1" value="').concat(esc(item.quantity), '" required></td><td data-label="实际付款"><input class="input" data-field="actualPaymentCents" inputmode="decimal" value="').concat(esc(valueMoney(item.actualPaymentCents)), '" required></td><td data-label="预计返款"><input class="input" data-field="expectedRefundCents" inputmode="decimal" value="').concat(esc(valueMoney(item.expectedRefundCents)), '" required></td><td data-label="预计返利"><input class="input" data-field="expectedRebateCents" inputmode="decimal" value="').concat(esc(valueMoney(item.expectedRebateCents)), '" required></td><td data-label="操作"><button class="link-button danger" type="button" data-action="remove-report-item">移除</button></td></tr>');
+    return '<tr class="report-item-editor" data-item-id="'.concat(esc(item.id || ""), '"><td data-label="物品名称">').concat(productNameInput(item.productName, 'data-field="productName" aria-label="物品名称"'), '</td><td data-label="备注"><input class="input" data-field="note" value="').concat(esc(item.note || ""), '" placeholder="可选"></td><td data-label="数量">').concat(quantityInput(item.quantity, 'data-field="quantity"', "商品数量"), '</td><td data-label="实际付款"><input class="input" data-field="actualPaymentCents" inputmode="decimal" placeholder="0.00" value="').concat(esc(editableMoneyValue(item.actualPaymentCents)), '"></td><td data-label="预计返款"><input class="input" data-field="expectedRefundCents" inputmode="decimal" placeholder="0.00" value="').concat(esc(editableMoneyValue(item.expectedRefundCents)), '"></td><td data-label="预计返利"><input class="input" data-field="expectedRebateCents" inputmode="decimal" placeholder="0.00" value="').concat(esc(editableMoneyValue(item.expectedRebateCents)), '"></td><td data-label="操作"><button class="link-button danger" type="button" data-action="remove-report-item">移除</button></td></tr>');
   }
   function collectReportForm(form) {
     const id = form.elements.id.value || Domain.makeId("report");
@@ -2183,15 +2294,15 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     openModal("调整实际返利", '<form data-form="rebate">'.concat(context, '<div class="info-box rebate-intro" id="rebate-help">填写原始整批商品的总返利，不是单件或本快递的分摊金额。系统会按已退款数量自动扣除对应返利，同批商品在其他快递中的分摊也会更新。默认按预计全额计入，也可自定义为 0；出库或快递结单后仍可调整，不改变商品付款和快递返款。</div><div class="rebate-items">').concat(items.map((item, index) => {
       const useExpected = item.actualRebateCents == null;
       const amount = Domain.actualRebateForItem(item);
-      return '<section class="rebate-item-editor" data-item-id="'.concat(esc(item.id), '" aria-labelledby="rebate-title-').concat(index, '"><h3 id="rebate-title-').concat(index, '">').concat(esc(productLabel(item)), '</h3><div class="rebate-item-meta"><span>原数量 ').concat(item.quantity, " 件</span><span>已退款 ").concat(Domain.refundQuantity(app.state, item.id), " 件</span><span>整批预计 ").concat(money(item.expectedRebateCents), '</span></div><label class="rebate-default"><input type="checkbox" data-field="useExpected"').concat(useExpected ? " checked" : "", '><span>按预计全额（默认）</span></label><div class="field"><label for="rebate-amount-').concat(index, '">整批实际返利（元）</label><input class="input" id="rebate-amount-').concat(index, '" data-field="actualRebateCents" inputmode="decimal" value="').concat(esc(valueMoney(amount)), '" aria-describedby="rebate-help rebate-preview-').concat(index, '" required').concat(useExpected ? " disabled" : "", '></div><p class="rebate-preview" id="rebate-preview-').concat(index, '" data-rebate-preview>计入利润：').concat(money(retainedRebate(item, amount)), "（已扣除退款部分）</p></section>");
-    }).join(""), '</div><p class="field-help rebate-help">勾选默认可恢复跟随预计返利；取消勾选后，填写自定义金额。已退款部分会自动排除，不必手动减去。</p><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存返利</button></div><input type="hidden" name="id" value="').concat(esc(reportId), '"></form>'), true);
+      return '<section class="rebate-item-editor" data-item-id="'.concat(esc(item.id), '" aria-labelledby="rebate-title-').concat(index, '"><h3 id="rebate-title-').concat(index, '">').concat(esc(productLabel(item)), '</h3><div class="rebate-item-meta"><span>原数量 ').concat(item.quantity, " 件</span><span>已退款 ").concat(Domain.refundQuantity(app.state, item.id), " 件</span><span>整批预计 ").concat(money(item.expectedRebateCents), '</span></div><label class="rebate-default"><input type="checkbox" data-field="useExpected"').concat(useExpected ? " checked" : "", '><span>按预计全额（默认）</span></label><div class="field"><label for="rebate-amount-').concat(index, '">整批实际返利（元）</label><input class="input" id="rebate-amount-').concat(index, '" data-field="actualRebateCents" inputmode="decimal" placeholder="0.00" value="').concat(esc(editableMoneyValue(amount)), '" aria-describedby="rebate-help rebate-preview-').concat(index, '"').concat(useExpected ? " disabled" : "", '></div><p class="rebate-preview" id="rebate-preview-').concat(index, '" data-rebate-preview>计入利润：').concat(money(retainedRebate(item, amount)), "（已扣除退款部分）</p></section>");
+    }).join(""), '</div><p class="field-help rebate-help">勾选默认可恢复跟随预计返利；取消勾选后，填写自定义金额，留空按 0.00 计。已退款部分会自动排除，不必手动减去。</p><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存返利</button></div><input type="hidden" name="id" value="').concat(esc(reportId), '"></form>'), true);
   }
   function collectRebateForm(form) {
     return {
       id: form.elements.id.value,
       items: $$(".rebate-item-editor", form).map((row) => ({
         id: row.dataset.itemId,
-        actualRebateCents: $('[data-field="useExpected"]', row).checked ? null : Domain.parseMoney($('[data-field="actualRebateCents"]', row).value, "实际返利")
+        actualRebateCents: $('[data-field="useExpected"]', row).checked ? null : parseMoneyInput($('[data-field="actualRebateCents"]', row).value, "实际返利")
       }))
     };
   }
@@ -2205,14 +2316,14 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       if (input.disabled !== useExpected) {
         if (useExpected) {
           input.dataset.customValue = input.value;
-          input.value = valueMoney(item.expectedRebateCents);
+          input.value = editableMoneyValue(item.expectedRebateCents);
         } else if (input.dataset.customValue !== void 0) {
           input.value = input.dataset.customValue;
         }
       }
       input.disabled = useExpected;
       try {
-        const amount = useExpected ? item.expectedRebateCents : Domain.parseMoney(input.value, "实际返利");
+        const amount = useExpected ? item.expectedRebateCents : parseMoneyInput(input.value, "实际返利");
         preview.className = "rebate-preview";
         preview.textContent = "计入利润：".concat(money(retainedRebate(item, amount)), "（已扣除退款部分）");
       } catch (error) {
@@ -2236,11 +2347,11 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }
     const lines = existing ? [...grouped.values()] : [{ productName: "", quantity: 1 }];
     const options = productOptions(shipmentId || "");
-    openModal(existing ? "编辑快递" : "新增快递", '<form data-form="shipment"><div class="form-grid"><div class="field"><label>快递单号</label><input class="input" name="trackingNumber" value="'.concat(esc((existing == null ? void 0 : existing.shipment.trackingNumber) || ""), '" required placeholder="单号"></div><div class="field"><label>快递价格</label><input class="input" name="shippingCost" inputmode="decimal" value="').concat(esc(valueMoney((existing == null ? void 0 : existing.shipment.shippingCostCents) || 0)), '" required></div><div class="field"><label>发出时间</label><input class="input" name="shippedAt" type="datetime-local" value="').concat(esc(dateInputValue(existing == null ? void 0 : existing.shipment.shippedAt)), '" required></div><div class="field"><label>备注</label><input class="input" name="note" value="').concat(esc((existing == null ? void 0 : existing.shipment.note) || ""), '" placeholder="可选"></div></div><div class="modal-section"><div class="modal-section-heading"><h3>快递内容</h3><button class="button button-small button-quiet" type="button" data-action="add-shipment-item">添加商品行</button></div><div class="field-help" style="margin-bottom:10px">保存时会按报单时间从早到晚自动扣除库存批次。</div><div class="table-wrap"><table class="editor-table"><thead><tr><th>商品</th><th>数量</th><th></th></tr></thead><tbody id="shipment-items-editor">').concat(lines.map((line) => shipmentItemEditorRow(line, options)).join(""), '</tbody></table></div><div id="shipment-financial-preview" class="info-box shipment-financial-preview"></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存快递</button></div><input type="hidden" name="id" value="').concat(esc((existing == null ? void 0 : existing.shipment.id) || ""), '"></form>'), true);
+    openModal(existing ? "编辑快递" : "新增快递", '<form data-form="shipment"><div class="form-grid"><div class="field"><label>快递单号</label><input class="input" name="trackingNumber" value="'.concat(esc((existing == null ? void 0 : existing.shipment.trackingNumber) || ""), '" required placeholder="单号"></div><div class="field"><label>快递价格（留空为 0）</label><input class="input" name="shippingCost" inputmode="decimal" placeholder="0.00" value="').concat(esc(editableMoneyValue((existing == null ? void 0 : existing.shipment.shippingCostCents) || 0)), '"></div><div class="field"><label>发出时间</label><input class="input" name="shippedAt" type="datetime-local" value="').concat(esc(dateInputValue(existing == null ? void 0 : existing.shipment.shippedAt)), '" required></div><div class="field"><label>备注</label><input class="input" name="note" value="').concat(esc((existing == null ? void 0 : existing.shipment.note) || ""), '" placeholder="可选"></div></div><div class="modal-section"><div class="modal-section-heading"><h3>快递内容</h3><button class="button button-small button-quiet" type="button" data-action="add-shipment-item">添加商品行</button></div><div class="field-help" style="margin-bottom:10px">保存时会按报单时间从早到晚自动扣除库存批次。</div><div class="table-wrap"><table class="editor-table"><thead><tr><th>商品</th><th>数量</th><th></th></tr></thead><tbody id="shipment-items-editor">').concat(lines.map((line) => shipmentItemEditorRow(line, options)).join(""), '</tbody></table></div><div id="shipment-financial-preview" class="info-box shipment-financial-preview"></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存快递</button></div><input type="hidden" name="id" value="').concat(esc((existing == null ? void 0 : existing.shipment.id) || ""), '"></form>'), true);
     updateShipmentFinancialPreview($('form[data-form="shipment"]'));
   }
   function shipmentItemEditorRow(item, options) {
-    return '<tr class="shipment-item-editor"><td data-label="商品"><select class="select" data-field="productName" required><option value="">选择商品</option>'.concat(options, '</select></td><td data-label="数量"><input class="input" data-field="quantity" type="number" min="1" step="1" value="').concat(esc(item.quantity || 1), '" required></td><td data-label="操作"><button class="link-button danger" type="button" data-action="remove-shipment-item">移除</button></td></tr>').replace('<option value="'.concat(esc(item.productName), '">'), '<option value="'.concat(esc(item.productName), '" selected>'));
+    return '<tr class="shipment-item-editor"><td data-label="商品"><select class="select" data-field="productName" required><option value="">选择商品</option>'.concat(options, '</select></td><td data-label="数量">').concat(quantityInput(item.quantity || 1, 'data-field="quantity"', "发货数量"), '</td><td data-label="操作"><button class="link-button danger" type="button" data-action="remove-shipment-item">移除</button></td></tr>').replace('<option value="'.concat(esc(item.productName), '">'), '<option value="'.concat(esc(item.productName), '" selected>'));
   }
   function collectShipmentForm(form) {
     const items = $$(".shipment-item-editor", form).map((row) => ({
@@ -2261,10 +2372,17 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function updateShipmentFinancialPreview(form) {
     const output = form && $("#shipment-financial-preview", form);
     if (!output) return;
-    const items = $$(".shipment-item-editor", form).map((row) => ({
+    const rows = $$(".shipment-item-editor", form);
+    const items = rows.map((row) => ({
       productName: $('[data-field="productName"]', row).value,
       quantity: Number($('[data-field="quantity"]', row).value)
     }));
+    const available = new Map(Domain.aggregateInventory(app.state, { excludeShipmentId: form.elements.id.value || "" }).map((product) => [product.productName, product.availableQuantity]));
+    rows.forEach((row, index) => {
+      const item = items[index];
+      const otherQuantity = items.reduce((sum, other, otherIndex) => sum + (otherIndex !== index && other.productName === item.productName && Number.isSafeInteger(other.quantity) && other.quantity > 0 ? other.quantity : 0), 0);
+      $('[data-field="quantity"]', row).max = String(item.productName ? Math.max(0, (available.get(item.productName) || 0) - otherQuantity) : Number.MAX_SAFE_INTEGER);
+    });
     if (!items.length || items.some((item) => !item.productName || !Number.isInteger(item.quantity) || item.quantity < 1)) {
       output.className = "info-box shipment-financial-preview";
       output.textContent = "选择商品并填写数量后，这里会自动计算所含商品实际付款和预计返款。";
@@ -2291,7 +2409,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function settlementEditor(shipmentId, settlementId = "") {
     const view = shipmentViews().find((item) => item.shipment.id === shipmentId);
     const settlement = view == null ? void 0 : view.settlements.find((item) => item.id === settlementId);
-    openModal(settlement ? "编辑返款" : "落实快递返款", '<form data-form="settlement"><div class="info-box" style="margin-bottom:16px">'.concat(esc((view == null ? void 0 : view.shipment.trackingNumber) || ""), " · 预计返款 ").concat(money((view == null ? void 0 : view.expectedRefundCents) || 0), " · 已登记 ").concat(money((view == null ? void 0 : view.returnedCents) || 0), '<span class="stat-subfoot">当前差额：').concat(esc(refundDifferenceText(((view == null ? void 0 : view.returnedCents) || 0) - ((view == null ? void 0 : view.expectedRefundCents) || 0))), '</span></div><div class="field-help">实际返款不包含商品返利；实际返利会单独计入利润，默认按预计全额计算。结单后返款金额锁定，返利仍可在报单中调整。</div><div class="form-grid"><div class="field"><label>实际返款金额</label><input class="input" name="amount" inputmode="decimal" value="').concat(esc(valueMoney((settlement == null ? void 0 : settlement.amountCents) || 0)), '" required></div><div class="field"><label>返款时间</label><input class="input" name="settledAt" type="datetime-local" value="').concat(esc(dateInputValue(settlement == null ? void 0 : settlement.settledAt)), '" required></div><div class="field full"><label>备注</label><input class="input" name="note" value="').concat(esc((settlement == null ? void 0 : settlement.note) || ""), '" placeholder="可选"></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存返款</button></div><input type="hidden" name="shipmentId" value="').concat(esc(shipmentId), '"><input type="hidden" name="id" value="').concat(esc((settlement == null ? void 0 : settlement.id) || ""), '"></form>'));
+    openModal(settlement ? "编辑返款" : "落实快递返款", '<form data-form="settlement"><div class="info-box" style="margin-bottom:16px">'.concat(esc((view == null ? void 0 : view.shipment.trackingNumber) || ""), " · 预计返款 ").concat(money((view == null ? void 0 : view.expectedRefundCents) || 0), " · 已登记 ").concat(money((view == null ? void 0 : view.returnedCents) || 0), '<span class="stat-subfoot">当前差额：').concat(esc(refundDifferenceText(((view == null ? void 0 : view.returnedCents) || 0) - ((view == null ? void 0 : view.expectedRefundCents) || 0))), '</span></div><div class="field-help">实际返款不包含商品返利；实际返利会单独计入利润，默认按预计全额计算。结单后返款金额锁定，返利仍可在报单中调整。</div><div class="form-grid"><div class="field"><label>实际返款金额（留空为 0）</label><input class="input" name="amount" inputmode="decimal" placeholder="0.00" value="').concat(esc(editableMoneyValue((settlement == null ? void 0 : settlement.amountCents) || 0)), '"></div><div class="field"><label>返款时间</label><input class="input" name="settledAt" type="datetime-local" value="').concat(esc(dateInputValue(settlement == null ? void 0 : settlement.settledAt)), '" required></div><div class="field full"><label>备注</label><input class="input" name="note" value="').concat(esc((settlement == null ? void 0 : settlement.note) || ""), '" placeholder="可选"></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存返款</button></div><input type="hidden" name="shipmentId" value="').concat(esc(shipmentId), '"><input type="hidden" name="id" value="').concat(esc((settlement == null ? void 0 : settlement.id) || ""), '"></form>'));
   }
   function refundEditor(refundId = "", itemId = "") {
     const refund = refundId ? app.state.refunds.find((row) => row.id === refundId) : null;
@@ -2307,7 +2425,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     } : null;
     const selectable = currentRefundLot ? [currentRefundLot, ...lots.filter((lot) => lot.reportItemId !== currentRefundLot.reportItemId)] : lots;
     const options = selectable.filter(Boolean).map((lot) => '<option value="'.concat(esc(lot.reportItemId), '" ').concat(lot.reportItemId === (itemId || (refund == null ? void 0 : refund.reportItemId)) ? "selected" : "", ">").concat(esc(lot.productName), " · ").concat(esc(dateText(lot.sourceDate)), " · 可退 ").concat(lot.availableQuantity, "</option>")).join("");
-    openModal(refund ? "编辑退款" : "登记退款", '<form data-form="refund"><div class="form-grid"><div class="field full"><label>商品批次</label><select class="select" name="reportItemId" required><option value="">选择库存批次</option>'.concat(options, '</select></div><div class="field"><label>退款数量</label><input class="input" name="quantity" type="number" min="1" step="1" value="').concat(esc((refund == null ? void 0 : refund.quantity) || 1), '" required></div><div class="field"><label>退款金额（自动计算）</label><input class="input" name="amount" value="0.00" readonly aria-readonly="true"></div><div class="field"><label>退款时间</label><input class="input" name="refundedAt" type="datetime-local" value="').concat(esc(dateInputValue(refund == null ? void 0 : refund.refundedAt)), '" required></div><div class="field"><label>备注</label><input class="input" name="note" value="').concat(esc((refund == null ? void 0 : refund.note) || ""), '" placeholder="可选"></div></div><div class="info-box" style="margin-top:16px">退款金额 = 商品实际付款总额 × 退款数量 ÷ 商品报单数量。金额由系统生成，不需要手填；分次退款的舍入余数会自动计入最后一笔。</div><div class="warning-box" style="margin-top:12px">退款会使商品退出仓库，并从累计商品付款、预计收益和利率统计中扣除。</div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存退款</button></div><input type="hidden" name="id" value="').concat(esc((refund == null ? void 0 : refund.id) || ""), '"></form>'));
+    openModal(refund ? "编辑退款" : "登记退款", '<form data-form="refund"><div class="form-grid"><div class="field full"><label>商品批次</label><select class="select" name="reportItemId" required><option value="">选择库存批次</option>'.concat(options, '</select></div><div class="field"><label>退款数量</label>').concat(quantityInput((refund == null ? void 0 : refund.quantity) || 1, 'name="quantity"', "退款数量"), '</div><div class="field"><label>退款金额（自动计算）</label><input class="input" name="amount" value="0.00" readonly aria-readonly="true"></div><div class="field"><label>退款时间</label><input class="input" name="refundedAt" type="datetime-local" value="').concat(esc(dateInputValue(refund == null ? void 0 : refund.refundedAt)), '" required></div><div class="field"><label>备注</label><input class="input" name="note" value="').concat(esc((refund == null ? void 0 : refund.note) || ""), '" placeholder="可选"></div></div><div class="info-box" style="margin-top:16px">退款金额 = 商品实际付款总额 × 退款数量 ÷ 商品报单数量。金额由系统生成，不需要手填；分次退款的舍入余数会自动计入最后一笔。</div><div class="warning-box" style="margin-top:12px">退款会使商品退出仓库，并从累计商品付款、预计收益和利率统计中扣除。</div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存退款</button></div><input type="hidden" name="id" value="').concat(esc((refund == null ? void 0 : refund.id) || ""), '"></form>'));
     updateRefundAmount($('form[data-form="refund"]'));
   }
   function updateRefundAmount(form) {
@@ -2315,6 +2433,9 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     if (!((_a = form == null ? void 0 : form.elements) == null ? void 0 : _a.amount)) return;
     const quantity = Number(form.elements.quantity.value || 0);
     const reportItemId = form.elements.reportItemId.value;
+    const available = Domain.inventoryLots(app.state).find((lot) => lot.reportItemId === reportItemId);
+    const currentRefund = app.state.refunds.find((refund) => refund.id === form.elements.id.value && Domain.isActive(refund));
+    form.elements.quantity.max = String(reportItemId ? ((available == null ? void 0 : available.availableQuantity) || 0) + ((currentRefund == null ? void 0 : currentRefund.reportItemId) === reportItemId ? currentRefund.quantity : 0) : Number.MAX_SAFE_INTEGER);
     if (!reportItemId || quantity < 1) {
       form.elements.amount.value = valueMoney(0);
       return;
@@ -2461,6 +2582,9 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   document.addEventListener("click", (event) => {
     var _a;
     const start = event.target instanceof Element ? event.target : event.target.parentElement;
+    $$("[data-product-history]").forEach((input) => {
+      if (!input.closest(".product-name-field").contains(start)) closeProductSuggestions(input);
+    });
     const target = start == null ? void 0 : start.closest("[data-action], [data-view]");
     if (!target || target.classList.contains("modal-backdrop") && event.target !== target) return;
     event.preventDefault();
@@ -2469,7 +2593,13 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       return;
     }
     const action = target.dataset.action;
-    if (action === "close-modal") {
+    if (action === "step-quantity") {
+      stepQuantity(target);
+    } else if (action === "choose-product-name") {
+      chooseProductName(target);
+    } else if (action === "rename-inventory") {
+      inventoryRenameEditor(target.dataset.productName);
+    } else if (action === "close-modal") {
       closeModal();
     } else if (action === "confirm-action") {
       const callback = app.confirmation;
@@ -2543,12 +2673,13 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     else if (action === "save-export") saveExportFile();
   });
   document.addEventListener("input", (event) => {
-    var _a, _b, _c, _d, _e, _f;
-    const rebateForm = (_b = (_a = event.target).closest) == null ? void 0 : _b.call(_a, 'form[data-form="rebate"]');
+    var _a, _b, _c, _d, _e, _f, _g, _h;
+    if (((_b = (_a = event.target).hasAttribute) == null ? void 0 : _b.call(_a, "data-product-history")) && !event.isComposing) updateProductSuggestions(event.target);
+    const rebateForm = (_d = (_c = event.target).closest) == null ? void 0 : _d.call(_c, 'form[data-form="rebate"]');
     if (rebateForm) updateRebatePreview(rebateForm);
-    const refundForm = (_d = (_c = event.target).closest) == null ? void 0 : _d.call(_c, 'form[data-form="refund"]');
+    const refundForm = (_f = (_e = event.target).closest) == null ? void 0 : _f.call(_e, 'form[data-form="refund"]');
     if (refundForm) updateRefundAmount(refundForm);
-    const shipmentForm = (_f = (_e = event.target).closest) == null ? void 0 : _f.call(_e, 'form[data-form="shipment"]');
+    const shipmentForm = (_h = (_g = event.target).closest) == null ? void 0 : _h.call(_g, 'form[data-form="shipment"]');
     if (shipmentForm) updateShipmentFinancialPreview(shipmentForm);
     if (event.target.dataset.search) {
       app.search = event.target.value;
@@ -2557,6 +2688,57 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       if (input) {
         input.focus();
         input.setSelectionRange(app.search.length, app.search.length);
+      }
+    }
+  });
+  document.addEventListener("focusin", (event) => {
+    $$("[data-product-history]").forEach((input) => {
+      if (input === event.target) updateProductSuggestions(input);
+    });
+  });
+  document.addEventListener("focusout", (event) => {
+    var _a, _b;
+    const field = (_b = (_a = event.target).closest) == null ? void 0 : _b.call(_a, ".product-name-field");
+    if (!field) return;
+    setTimeout(() => {
+      var _a2;
+      if (!field.contains(document.activeElement) && !((_a2 = document.activeElement) == null ? void 0 : _a2.closest("button"))) closeProductSuggestions($("[data-product-history]", field));
+    }, 0);
+  });
+  document.addEventListener("compositionend", (event) => {
+    var _a, _b;
+    if ((_b = (_a = event.target).hasAttribute) == null ? void 0 : _b.call(_a, "data-product-history")) updateProductSuggestions(event.target);
+  });
+  document.addEventListener("keydown", (event) => {
+    var _a;
+    const input = event.target;
+    if (!((_a = input.hasAttribute) == null ? void 0 : _a.call(input, "data-product-history")) || event.isComposing || event.keyCode === 229) return;
+    const list = $(".product-suggestions", input.closest(".product-name-field"));
+    if (event.key === "Tab") {
+      closeProductSuggestions(input);
+      return;
+    }
+    if (event.key === "Escape") {
+      closeProductSuggestions(input);
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (list.hidden) updateProductSuggestions(input);
+      const choices = $$('[data-action="choose-product-name"]', list);
+      if (!choices.length) return;
+      event.preventDefault();
+      const current = input.dataset.suggestionIndex === void 0 ? -1 : Number(input.dataset.suggestionIndex);
+      const index = event.key === "ArrowDown" ? (current + 1) % choices.length : current < 0 ? choices.length - 1 : (current + choices.length - 1) % choices.length;
+      choices.forEach((choice, i) => choice.setAttribute("aria-selected", String(i === index)));
+      input.dataset.suggestionIndex = String(index);
+      input.setAttribute("aria-activedescendant", choices[index].id);
+      choices[index].scrollIntoView({ block: "nearest" });
+    } else if (event.key === "Enter" && !list.hidden && input.dataset.suggestionIndex !== void 0) {
+      const choice = $$('[data-action="choose-product-name"]', list)[Number(input.dataset.suggestionIndex)];
+      if (choice) {
+        event.preventDefault();
+        chooseProductName(choice);
       }
     }
   });
@@ -2576,6 +2758,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       if (form.dataset.form === "report") {
         const payload = collectReportForm(form);
         dispatch(form.elements.id.value ? "report.update" : "report.create", payload);
+      } else if (form.dataset.form === "inventory-rename") {
+        dispatch("inventory.rename", collectInventoryRenameForm(form));
       } else if (form.dataset.form === "rebate") {
         dispatch("report.rebate.update", collectRebateForm(form));
       } else if (form.dataset.form === "shipment") {
@@ -2617,7 +2801,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   localStorageRead();
   render();
   if (window.OrderReportBoot) window.OrderReportBoot.ready();
-  if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register("sw.js?v=12").catch(() => {
+  if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register("sw.js?v=13").catch(() => {
   });
   sync();
   window.addEventListener("online", sync);

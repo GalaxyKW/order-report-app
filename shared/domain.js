@@ -530,6 +530,40 @@
     return [...byProduct.values()].sort((a, b) => a.productName.localeCompare(b.productName));
   }
 
+  function renameInventory(state, payload, now) {
+    if (typeof payload.productName !== 'string' || typeof payload.newName !== 'string') {
+      throw new Error('原商品名称和新商品名称必须是文字');
+    }
+    const productName = text(payload.productName, '原商品名称');
+    const newName = text(payload.newName, '新商品名称');
+    if (!Array.isArray(payload.reportItemIds) || !payload.reportItemIds.length) {
+      throw new Error('至少选择一个在库商品批次修改名称');
+    }
+    // Capture explicit batches, not every historical row with the same name.
+    // This also prevents an offline rename from absorbing later-added stock.
+    const availableIds = new Set(inventoryLots(state).map((lot) => lot.reportItemId));
+    const seen = new Set();
+    const updates = payload.reportItemIds.map((id) => {
+      if (typeof id !== 'string' || !id.trim()) throw new Error('库存商品批次编号无效');
+      if (seen.has(id)) throw new Error('库存商品批次编号不能重复');
+      seen.add(id);
+      const item = itemById(state, id);
+      if (!item || !reportById(state, item.reportId)) throw new Error('库存商品或对应报单不存在、已作废');
+      if (item.productName !== productName) throw new Error('商品名称已变化，请刷新库存后重新修改');
+      if (!availableIds.has(id)) throw new Error('所选商品批次已无库存，请刷新库存后重新修改');
+      return item;
+    });
+    const reportIds = [...new Set(updates.map((item) => item.reportId))];
+    if (newName !== productName) {
+      for (const item of updates) {
+        item.productName = newName;
+        item.updatedAt = now;
+      }
+      for (const id of reportIds) reportById(state, id).updatedAt = now;
+    }
+    return { state, result: { productName, newName, itemIds: updates.map((item) => item.id), reportIds } };
+  }
+
   function allocateFifo(state, requestedLines, options = {}) {
     const requested = Array.isArray(requestedLines) ? requestedLines : [];
     if (!requested.length) throw new Error('至少添加一项快递商品');
@@ -909,6 +943,7 @@
       case 'report.update': applied = updateReport(state, operation.payload || {}, now, idFactory); break;
       case 'report.rebate.update': applied = updateReportRebate(state, operation.payload || {}, now); break;
       case 'report.void': applied = voidReport(state, operation.payload || {}, now); break;
+      case 'inventory.rename': applied = renameInventory(state, operation.payload || {}, now); break;
       case 'shipment.create': applied = addShipment(state, operation.payload || {}, now, idFactory); break;
       case 'shipment.update': applied = updateShipment(state, operation.payload || {}, now, idFactory); break;
       case 'shipment.void': applied = voidShipment(state, operation.payload || {}, now); break;

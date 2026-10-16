@@ -1,7 +1,7 @@
-const CACHE_NAME = 'order-report-shell-v12';
+const CACHE_NAME = 'order-report-shell-v13';
 // Keep these URLs aligned with index.html and the registration in app.js.
 // Versioned URLs bypass previously cached CDN responses and older workers.
-const SHELL = ['./', './index.html', './styles.css?v=12', './compat.js?v=12', './client.js?v=12', './manifest.webmanifest', './icons/app-icon.png', './icons/app-icon-192.png', './icons/app-icon-64.png'];
+const SHELL = ['./', './index.html', './styles.css?v=13', './compat.js?v=13', './client.js?v=13', './manifest.webmanifest', './icons/app-icon.png', './icons/app-icon-192.png', './icons/app-icon-64.png'];
 const SHELL_URLS = new Set(SHELL.map((path) => new URL(path, self.location.href).href));
 
 self.addEventListener('install', (event) => {

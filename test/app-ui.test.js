@@ -15,6 +15,8 @@ const presentationSource = `${source.slice(0, startupIndex)}
     app, icon, emptyState, dashboardQuickActions, renderDashboard, renderReports,
     renderShipments, renderInventory, renderRefunds, renderSettings, render, navigateView, shipmentEditor,
     rebateEditor, shipmentRebateEditor, collectRebateForm, updateRebatePreview, reportEditor, reportItemEditorRow, collectReportForm,
+    editableMoneyValue, parseMoneyInput, quantityInput, stepQuantity, productNameInput, historicalProductNames,
+    collectShipmentForm, settlementEditor, refundEditor, inventoryRenameEditor, collectInventoryRenameForm,
   };
 })();`;
 const views = ['dashboard', 'reports', 'shipments', 'inventory', 'refunds', 'settings'];
@@ -44,7 +46,10 @@ function createHarness() {
     },
     querySelectorAll(selector) { return selector === '.nav-item' ? navigation : []; },
   };
-  const context = vm.createContext({ window, document });
+  class Event {
+    constructor(type, options) { this.type = type; Object.assign(this, options); }
+  }
+  const context = vm.createContext({ window, document, Event });
   vm.runInContext(presentationSource, context, { filename: appPath });
   return {
     ...window.__ui, navigation, main, modal,
@@ -388,7 +393,8 @@ test('custom zero survives reopening and a default reset restores forecast-based
   assert.equal(Domain.stats(ui.app.state).profitCents, originalProfit - 300);
   assert.equal(Domain.stats(ui.app.state).expectedRebateCents, 300);
   ui.rebateEditor('ui_report');
-  assert.match(ui.modal.innerHTML, /data-field="actualRebateCents"[^>]*value="0\.00"/);
+  assert.match(ui.modal.innerHTML, /data-field="actualRebateCents"[^>]*value=""/);
+  assert.match(ui.modal.innerHTML, /data-field="actualRebateCents"[^>]*placeholder="0\.00"/);
   assert.doesNotMatch(ui.modal.innerHTML, /data-field="useExpected" checked/);
   assert.match(ui.modal.innerHTML, /计入利润：¥0\.00/);
   const reset = ui.collectRebateForm(rebateForm([{ id: 'ui_item', useExpected: true, value: 'ignored disabled input' }]));
@@ -421,14 +427,201 @@ test('rebate form collects multiple items as integer cents without changing the 
   assert.equal(Object.prototype.hasOwnProperty.call(ui.collectReportForm(reportForm).items[0], 'actualRebateCents'), false);
 });
 
-test('invalid custom rebate input is rejected without treating an empty amount as zero', () => {
+test('blank custom rebates mean zero while malformed or negative amounts remain rejected', () => {
   const ui = createHarness();
   ui.app.state = sampleState();
   const before = JSON.stringify(ui.app.state);
-  for (const value of ['', ' ', '-1', '1.001', 'NaN', '1e2', '90071992547409.92']) {
+  for (const value of ['', ' ', '\t\n']) {
+    assert.equal(ui.collectRebateForm(rebateForm([{ id: 'ui_item', useExpected: false, value }])).items[0].actualRebateCents, 0);
+  }
+  for (const value of ['-1', '1.001', 'NaN', '1e2', '90071992547409.92']) {
     assert.throws(() => ui.collectRebateForm(rebateForm([{ id: 'ui_item', useExpected: false, value }])), /实际返利/);
   }
   assert.equal(JSON.stringify(ui.app.state), before);
+});
+
+test('editable money shows a zero placeholder without hiding existing nonzero amounts', () => {
+  const ui = createHarness();
+  assert.equal(ui.editableMoneyValue(0), '');
+  assert.equal(ui.editableMoneyValue(123), '1.23');
+  for (const value of ['', ' ', '\t\n', '0', '0.00']) assert.equal(ui.parseMoneyInput(value, '测试金额'), 0);
+  assert.equal(ui.parseMoneyInput(' 1.23 ', '测试金额'), 123);
+  ui.reportEditor();
+  const reportMoney = [...ui.modal.innerHTML.matchAll(/<input\b[^>]*data-field="(?:actualPaymentCents|expectedRefundCents|expectedRebateCents)"[^>]*>/g)].map((match) => match[0]);
+  assert.equal(reportMoney.length, 3);
+  for (const input of reportMoney) {
+    assert.match(input, /value=""/);
+    assert.match(input, /placeholder="0\.00"/);
+    assert.doesNotMatch(input, /\brequired\b/);
+  }
+  ui.app.state = sampleState();
+  ui.shipmentEditor();
+  assert.match(ui.modal.innerHTML, /name="shippingCost"(?=[^>]*value="")(?=[^>]*placeholder="0\.00")/);
+  ui.app.state.shipments[0].closedAt = null;
+  ui.settlementEditor('ui_shipment');
+  assert.match(ui.modal.innerHTML, /name="amount"(?=[^>]*value="")(?=[^>]*placeholder="0\.00")/);
+  ui.refundEditor('', 'ui_item');
+  assert.match(ui.modal.innerHTML, /name="amount"[^>]*readonly/);
+  assert.doesNotMatch(ui.modal.innerHTML, /name="amount"[^>]*placeholder="0\.00"/);
+});
+
+test('blank report and shipment amounts collect as exact integer zero cents', () => {
+  const ui = createHarness();
+  const fields = { productName: '测试商品', note: '', quantity: '1', actualPaymentCents: '', expectedRefundCents: ' ', expectedRebateCents: '' };
+  const row = {
+    dataset: { itemId: 'blank-item' },
+    querySelector(selector) { return { value: fields[selector.match(/data-field="([^\"]+)"/)[1]] }; },
+  };
+  const form = {
+    elements: {
+      id: { value: 'blank-record' }, occurredAt: { value: '2026-10-16T10:00' }, originalMessage: { value: '' },
+      trackingNumber: { value: 'DEMO-BLANK' }, shippingCost: { value: ' ' }, shippedAt: { value: '2026-10-16' }, note: { value: '' },
+    },
+    querySelectorAll() { return [row]; },
+  };
+  const item = ui.collectReportForm(form).items[0];
+  for (const key of ['actualPaymentCents', 'expectedRefundCents', 'expectedRebateCents']) assert.equal(item[key], 0);
+  assert.equal(ui.collectShipmentForm(form).shipment.shippingCostCents, 0);
+});
+
+test('all editable quantity inputs include named non-submit increment and decrement buttons', () => {
+  const ui = createHarness();
+  ui.app.state = sampleState();
+  for (const render of [() => ui.reportEditor(), () => ui.shipmentEditor(), () => ui.refundEditor('', 'ui_item')]) {
+    render();
+    const html = ui.modal.innerHTML;
+    const quantities = html.match(/<input\b[^>]*type="number"[^>]*>/g) || [];
+    const buttons = html.match(/<button\b[^>]*data-action="step-quantity"[^>]*>/g) || [];
+    assert.ok(quantities.length > 0);
+    assert.equal(buttons.length, quantities.length * 2);
+    for (const input of quantities) {
+      assert.match(input, /min="1"/);
+      assert.match(input, /step="1"/);
+    }
+    for (const button of buttons) {
+      assert.match(button, /type="button"/);
+      assert.match(button, /aria-label="[^\"]+"/);
+    }
+    assert.equal(buttons.filter((button) => button.includes('data-step="1"')).length, quantities.length);
+    assert.equal(buttons.filter((button) => button.includes('data-step="-1"')).length, quantities.length);
+  }
+});
+
+test('quantity stepping respects safe bounds and emits the events used by financial previews', () => {
+  const ui = createHarness();
+  const events = [];
+  const input = { value: '2', min: '1', max: '3', disabled: false, readOnly: false, dispatchEvent(event) { events.push([event.type, event.bubbles]); } };
+  const group = { querySelector(selector) { return selector === 'input' ? input : null; } };
+  const button = { dataset: { step: '1' }, closest() { return group; } };
+  ui.stepQuantity(button);
+  assert.equal(input.value, '3');
+  assert.deepEqual(events, [['input', true], ['change', true]]);
+  ui.stepQuantity(button);
+  assert.equal(input.value, '3');
+  for (const value of ['', ' ', 'not-a-number', '1.5', '9007199254740992']) {
+    input.value = value;
+    ui.stepQuantity(button);
+    assert.equal(input.value, '1', `invalid quantity ${JSON.stringify(value)} must recover to its minimum`);
+  }
+  input.max = String(Number.MAX_SAFE_INTEGER);
+  input.value = input.max;
+  ui.stepQuantity(button);
+  assert.equal(input.value, String(Number.MAX_SAFE_INTEGER));
+  input.value = '1';
+  button.dataset.step = '-1';
+  ui.stepQuantity(button);
+  assert.equal(input.value, '1');
+  input.max = '0';
+  events.length = 0;
+  input.value = '2';
+  ui.stepQuantity(button);
+  assert.equal(input.value, '1', 'a decrement must still correct overbooked duplicate shipment rows');
+  assert.deepEqual(events, [['input', true], ['change', true]]);
+  events.length = 0;
+  button.dataset.step = '1';
+  ui.stepQuantity(button);
+  assert.equal(input.value, '1', 'increment must not manufacture available stock');
+  assert.deepEqual(events, []);
+  input.max = '3';
+  for (const property of ['disabled', 'readOnly']) {
+    input[property] = true;
+    input.value = '2';
+    ui.stepQuantity(button);
+    assert.equal(input.value, '2');
+    assert.deepEqual(events, []);
+    input[property] = false;
+  }
+  button.dataset.step = '999';
+  ui.stepQuantity(button);
+  assert.equal(input.value, '2');
+  assert.deepEqual(events, []);
+});
+
+function historyState() {
+  let state = sampleState();
+  let serial = 0;
+  for (const productName of ['USB 收纳盒', 'USB 收纳盒', 'USB 文件袋', '__proto__', 'constructor', '<img src=x onerror=alert(1)>', 'toString', '已作废的历史商品']) {
+    const id = `history-${++serial}`;
+    state = Domain.applyOperation(state, {
+      type: 'report.create', opId: `history-op-${serial}`, clientId: 'history-test',
+      payload: { report: { id, occurredAt: '2026-10-16' }, items: [{ id: `${id}-item`, productName, quantity: 1, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 }] },
+    }, { now: '2026-10-16T10:00:00.000Z' }).state;
+  }
+  state = Domain.applyOperation(state, { type: 'report.void', opId: 'history-void', clientId: 'history-test', payload: { id: 'history-8' } }, { now: '2026-10-16T10:00:00.000Z' }).state;
+  return state;
+}
+
+test('product history is deduplicated, case-insensitive and excludes void reports without mutating state', () => {
+  const ui = createHarness();
+  ui.app.state = historyState();
+  const before = JSON.stringify(ui.app.state);
+  assert.deepEqual([...ui.historicalProductNames('usb')].sort(), ['USB 收纳盒', 'USB 文件袋']);
+  assert.deepEqual([...ui.historicalProductNames('usb 收纳')], ['USB 收纳盒']);
+  assert.deepEqual([...ui.historicalProductNames('已作废')], []);
+  assert.deepEqual([...ui.historicalProductNames('不存在的名称')], []);
+  for (const name of ['__proto__', 'constructor', 'toString']) assert.deepEqual([...ui.historicalProductNames(name)], [name]);
+  assert.ok(ui.historicalProductNames('').length <= 8);
+  assert.equal(new Set(ui.historicalProductNames('')).size, ui.historicalProductNames('').length);
+  assert.equal(JSON.stringify(ui.app.state), before);
+});
+
+test('product inputs provide an escaped and accessible local-history combobox', () => {
+  const ui = createHarness();
+  ui.app.state = historyState();
+  const unsafe = '<img src=x onerror=alert(1)>"';
+  const html = ui.productNameInput(unsafe);
+  assert.ok(!html.includes(unsafe));
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;&quot;/);
+  assert.match(html, /data-product-history/);
+  assert.match(html, /role="combobox"/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /role="listbox"/);
+  assert.match(html, /class="product-suggestions"[^>]*hidden/);
+});
+
+test('inventory groups same names while rename captures only in-stock source ids and escapes special names', () => {
+  const ui = createHarness();
+  ui.app.state = historyState();
+  ui.app.state = Domain.applyOperation(ui.app.state, {
+    type: 'shipment.create', opId: 'history-sold-out', clientId: 'history-test',
+    payload: { shipment: { id: 'history-shipment', trackingNumber: 'DEMO-HISTORY-ONLY', shippingCostCents: 0, shippedAt: '2026-10-16' }, items: [{ productName: 'USB 收纳盒', quantity: 1 }] },
+  }, { now: '2026-10-16T10:00:00.000Z', idFactory: (prefix) => `history-sold-out-${prefix}` }).state;
+  const before = JSON.stringify(ui.app.state);
+  const inventory = ui.renderInventory();
+  assert.equal((inventory.match(/class="panel inventory-group" data-product-name="USB 收纳盒"/g) || []).length, 1);
+  ui.inventoryRenameEditor('USB 收纳盒');
+  assert.match(ui.modal.innerHTML, /form data-form="inventory-rename"/);
+  const encodedIds = ui.modal.innerHTML.match(/name="reportItemIds" value="([^\"]+)"/)[1];
+  const ids = JSON.parse(encodedIds.replace(/&quot;/g, '"'));
+  assert.deepEqual(ids, ['history-2-item'], 'sold-out source batches must not be silently included in rename scope');
+  const form = { elements: { productName: { value: 'USB 收纳盒' }, newName: { value: '  USB 文件袋  ' }, reportItemIds: { value: JSON.stringify(ids) } } };
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.collectInventoryRenameForm(form))), { productName: 'USB 收纳盒', newName: 'USB 文件袋', reportItemIds: ['history-2-item'] });
+  for (const productName of ['__proto__', 'constructor', '<img src=x onerror=alert(1)>']) {
+    ui.inventoryRenameEditor(productName);
+    assert.match(ui.modal.innerHTML, /form data-form="inventory-rename"/);
+    assert.doesNotMatch(ui.modal.innerHTML, /<img src=x/);
+  }
+  assert.equal(JSON.stringify(ui.app.state), before, 'rendering and preparing a rename must not mutate data');
 });
 
 test('rebate previews honor refunds, preserve custom drafts across toggles and show invalid amounts', () => {
@@ -492,5 +685,23 @@ test('unsupported rebate operations explain server upgrade and fresh-id retry wi
   assert.match(settings, /换新编号重试/);
   assert.match(settings, /不要通过下载覆盖/);
   assert.match(settings, /调整实际返利/);
+  assert.equal(JSON.stringify({ state: ui.app.state, queue: ui.app.queue }), before);
+});
+
+test('unsupported inventory renames explain server upgrade while preserving the local rename operation', () => {
+  const ui = createHarness();
+  ui.app.state = historyState();
+  ui.app.queue = [{
+    opId: 'rename_rejected', type: 'inventory.rename', createdAt: '2026-10-16T10:00:00.000Z',
+    payload: { productName: 'USB 收纳盒', newName: 'USB 文件袋', reportItemIds: ['history-1-item', 'history-2-item'] },
+    syncError: '不支持的操作类型: inventory.rename',
+  }];
+  const before = JSON.stringify({ state: ui.app.state, queue: ui.app.queue });
+  const settings = ui.renderSettings();
+  assert.match(settings, /服务器版本尚不支持/);
+  assert.match(settings, /升级(?:并重启)?服务器/);
+  assert.match(settings, /换新编号重试/);
+  assert.match(settings, /不要通过下载覆盖/);
+  assert.match(settings, /仓库商品改名/);
   assert.equal(JSON.stringify({ state: ui.app.state, queue: ui.app.queue }), before);
 });

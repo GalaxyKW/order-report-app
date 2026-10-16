@@ -26,7 +26,7 @@ function createHarness({ source = SW_SOURCE, offline = false } = {}) {
     },
   };
   const self = {
-    location: new URL('https://app.example.test/app/sw.js?v=12'),
+    location: new URL('https://app.example.test/app/sw.js?v=13'),
     clients: { async claim() {} },
     addEventListener(type, listener) { listeners.set(type, listener); },
     skipWaiting() {},
@@ -103,11 +103,11 @@ test('the service worker ignores every non-shell same-origin GET even without an
 
 test('the service worker still refreshes and caches an explicit shell asset', async () => {
   const harness = createHarness();
-  const handled = await dispatchFetch(harness, request('https://app.example.test/app/client.js?v=12'));
+  const handled = await dispatchFetch(harness, request('https://app.example.test/app/client.js?v=13'));
 
   assert.notEqual(handled, null);
-  assert.deepEqual(harness.fetches, ['https://app.example.test/app/client.js?v=12']);
-  assert.deepEqual(harness.cacheWrites, ['https://app.example.test/app/client.js?v=12']);
+  assert.deepEqual(harness.fetches, ['https://app.example.test/app/client.js?v=13']);
+  assert.deepEqual(harness.cacheWrites, ['https://app.example.test/app/client.js?v=13']);
 });
 
 test('launcher and header icons are part of the offline shell', async () => {
@@ -152,7 +152,7 @@ test('versioned core assets remain available offline after installation', async 
   const harness = createHarness({ offline: true });
   await install(harness);
   for (const name of ['styles.css', 'compat.js', 'client.js']) {
-    const url = `https://app.example.test/app/${name}?v=12`;
+    const url = `https://app.example.test/app/${name}?v=13`;
     const response = await dispatchFetch(harness, request(url));
     assert.equal(response.cachedUrl, url);
   }
@@ -160,10 +160,10 @@ test('versioned core assets remain available offline after installation', async 
 });
 
 test('an older exact-whitelist worker does not intercept the new versioned code URLs', async () => {
-  const legacySource = SW_SOURCE.split('?v=12').join('');
+  const legacySource = SW_SOURCE.split('?v=13').join('');
   const harness = createHarness({ source: legacySource });
   for (const name of ['styles.css', 'compat.js', 'client.js']) {
-    assert.equal(await dispatchFetch(harness, request(`https://app.example.test/app/${name}?v=12`)), null);
+    assert.equal(await dispatchFetch(harness, request(`https://app.example.test/app/${name}?v=13`)), null);
   }
   assert.deepEqual(harness.fetches, []);
   assert.deepEqual(harness.cacheWrites, []);
@@ -171,10 +171,10 @@ test('an older exact-whitelist worker does not intercept the new versioned code 
 
 test('current workers do not intercept stale or unversioned code or authenticated shell requests', async () => {
   const harness = createHarness();
-  for (const suffix of ['', '?v=11', '?v=13', '?v=12&extra=1']) {
+  for (const suffix of ['', '?v=12', '?v=14', '?v=13&extra=1']) {
     assert.equal(await dispatchFetch(harness, request(`https://app.example.test/app/client.js${suffix}`)), null);
   }
-  assert.equal(await dispatchFetch(harness, request('https://app.example.test/app/client.js?v=12', ['X-Sync-Token'])), null);
+  assert.equal(await dispatchFetch(harness, request('https://app.example.test/app/client.js?v=13', ['X-Sync-Token'])), null);
   assert.deepEqual(harness.fetches, []);
   assert.deepEqual(harness.cacheWrites, []);
 });
